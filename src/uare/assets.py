@@ -26,7 +26,7 @@ from uare.analyze import resolve_layout
 from uare.errors import UareError, UnityFormatError
 from uare.logs import event
 from uare.outdir import staged_output
-from uare.serialized import ObjectReader, SerializedFile, read_serialized_file
+from uare.serialized import ObjectReader, SerializedFile, parse_serialized_file
 from uare.unity import FileKind, detect_kind
 
 LOG = logging.getLogger("uare.assets")
@@ -119,12 +119,17 @@ def _read_mono_script(file: SerializedFile, data: bytes, info) -> MonoScriptReco
     return MonoScriptRecord("", info.path_id, name, class_name, namespace, assembly)
 
 
+_MAX_STEM = 150
+
+
 def _unique_path(directory: Path, name: str, path_id: int, used: set[str]) -> Path:
-    stem = _SANITIZE.sub("_", name).strip("_") or f"asset_{path_id}"
+    stem = _SANITIZE.sub("_", name).strip("_.")[:_MAX_STEM] or f"asset_{path_id}"
     candidate = stem
-    if candidate in used:
-        candidate = f"{stem}.{path_id}"
-    used.add(candidate)
+    suffix = path_id
+    while candidate.casefold() in used:  # case-insensitive: APFS/NTFS fold case
+        candidate = f"{stem}.{suffix}"
+        suffix += 1
+    used.add(candidate.casefold())
     return directory / candidate
 
 
@@ -157,13 +162,13 @@ def analyze_assets(root: Path, out_dir: Path) -> AssetsResult:
              (staging / "monoscripts.tsv").open("w", encoding="utf-8") as mono_out:
             for data_dir in search_dirs:
                 for path in _iter_serialized(data_dir):
+                    data = path.read_bytes()
                     try:
-                        sf = read_serialized_file(path)
+                        sf = parse_serialized_file(data)
                     except UnityFormatError as exc:
                         event(LOG, logging.WARNING, "serialized_parse_failed", path=str(path), error=str(exc))
                         continue
                     serialized_files += 1
-                    data = path.read_bytes()
                     rel = path.relative_to(layout.root).as_posix()
                     for info in sf.objects:
                         class_id = info.class_id(sf.types)

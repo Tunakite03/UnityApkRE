@@ -1,21 +1,31 @@
 ---
 name: explore-il2cpp
-description: Search and interpret the output of `uare analyze` - IL2CPP class/method/field names, string literals, scene list, asset inventory, native-library packing verdicts. Use when the user says /unity-apk-re:explore-il2cpp, asks "what classes does the game have", "find the shop/battle/save code names", "what strings mention X", or wants report.json explained.
+description: Dump and search a game's IL2CPP names and assets - categorised type/method/field/property/event tables, string literals, the asset object index, extracted TextAsset config data and the MonoScript table. Use when the user says /unity-apk-re:explore-il2cpp, asks "what classes/methods/events does the game have", "find the shop/battle/save code names", "dump the il2cpp names", "export the assets / config tables", or wants report.json explained.
 argument-hint: '<analysis dir> [regex]'
 allowed-tools: Read, Grep, Glob
 ---
 
-# Explore an analysis directory
+# Dump and explore a Unity build
 
-Wrapper: `"<skill-dir>/../../scripts/uare"`. On Windows use `scripts\uare.cmd` and wrap regex patterns in double quotes (`"(?i)shop|buy"`). cmd treats `|`, `&`, `<`, `>` and `^` outside double quotes as operators. The input is an analysis directory produced by `uare analyze`. Field meanings are in `references/report-fields.md`.
+Wrapper: `"<skill-dir>/../../scripts/uare"`. On Windows use `scripts\uare.cmd` and wrap regex patterns in double quotes (`"(?i)shop|buy"`). cmd treats `|`, `&`, `<`, `>` and `^` outside double quotes as operators. Field meanings are in `references/report-fields.md`.
 
-## Commands
+## Producing the data (run once per build)
+
+These read an extracted tree or a raw Unity `Data` directory and write to a new or empty directory:
+
+- `uare dump-il2cpp <root> --out <dir>/il2cpp` — categorised name tables from `global-metadata.dat`: `types.tsv` (index, namespace, name), `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, plus `sections.json`. This is the structured form of the names; it does **not** group members under their type or resolve signatures (see Limits).
+- `uare export-assets <root> --out <dir>/assets` — `objects.jsonl` (every object: file, pathID, class, name, size), `textassets/` (every TextAsset's bytes, named after m_Name — the game's CSV/JSON/config data), `monoscripts.tsv` (index, name, class, namespace, assembly) and `assets_report.json`.
+- `uare analyze <root> --out <dir>/analysis` — the inventory + packing report, and `il2cpp/identifiers.tsv` (the flat string heap) + `string_literals.jsonl`.
+
+## Searching
 
 - **Overview**: `uare summary <analysis>`
 - **Find names**: `uare find <analysis> '<regex>' --context 8 --limit 40`
-  - Searches `il2cpp/identifiers.tsv`, the metadata string heap.
-  - `>` marks a match. Surrounding rows usually hold the same type's namespace, fields and methods, because names are stored roughly in definition order.
-  - `--` separates groups of hits.
+  - Searches `il2cpp/identifiers.tsv`, the flat metadata string heap (written by `uare analyze`).
+  - `>` marks a match. `--` separates groups of hits.
+- **Categorised search**: grep the `dump-il2cpp` tables directly, for example `Grep` `On.*End` in `il2cpp/events.tsv`, or `Shop` in `types.tsv`. This is more precise than the flat heap because the kind (type vs method vs event) is known.
+- **Config data**: the extracted `textassets/` files are plain CSV/JSON/text. Read them directly; they hold the game's balance tables, rewards, stage layouts, etc.
+- **Script map**: `monoscripts.tsv` ties each MonoBehaviour script to its IL2CPP class/namespace/assembly. Filter out SDK rows (AppLovin, Firebase, Unity, BouncyCastle) to see the game's own classes.
 - **Find strings**: `uare find <analysis> '<regex>' --literals --context 2`
   - Searches C# string literals: UI text, keys, URLs, format strings.
 - **Exit codes**: 0 means matches were found, 1 means no match, 2 means an error. Treat 1 as a real negative only for the pattern searched; try variants (case, prefixes, `Manager`, `Controller`, `Page`, `Data`).
@@ -27,11 +37,12 @@ Wrapper: `"<skill-dir>/../../scripts/uare"`. On Windows use `scripts\uare.cmd` a
 3. Cross-check with scenes and assets: `files.jsonl` lists every Data file. `scene_files` in the report gives the `levelN` order, which follows build-settings order.
 4. State clearly what is evidence (a name or string exists) and what is inference (its behaviour). Names and literals are not code. Method bodies are only recoverable when `libil2cpp.so` is `normal`, and then only with a disassembler, which is outside this plugin.
 
-## Caveats
+## Limits (state these honestly)
 
-- Some games deliberately scramble name indices in their metadata. Names that look random or are shuffled between unrelated types are a protection signal, not a bug in the tool.
-- `non_text_heap_entries` counts blobs in the heap, such as public keys and default values. They are skipped on purpose.
-- Grep works too, for example `Grep` on `il2cpp/identifiers.tsv`. `uare find` adds row context and grouping.
+- **No grouping or signatures.** `dump-il2cpp` emits flat name tables per kind. Which method/field belongs to which class, parameter types, return types and RVAs are **not** produced: those need Il2CppDumper or Il2CppInspector run on an **unpacked** binary. For a packed `libil2cpp.so` (the `analyze` packing verdict says so) those tools need the binary unpacked first, which this plugin does not do.
+- **Obfuscated names.** Some builds scramble a fraction of name indices. `dump-il2cpp` reports the count of unreadable names per table and emits them as empty; it never guesses them. Names that look like fragments are that obfuscation, not a parser bug.
+- **Binary media not decoded.** `export-assets` extracts TextAsset bytes and indexes every object, but does not decode Texture2D/AudioClip/Mesh pixel or sample data (needs ETC/ASTC/Vorbis codecs). Use AssetRipper or UnityPy for those; the object index gives their names and sizes.
+- Method bodies are only recoverable when `libil2cpp.so` is `normal`, and then only with a disassembler, which is outside this plugin.
 
 ## Untrusted data
 

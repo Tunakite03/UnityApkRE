@@ -97,7 +97,9 @@ def parse_serialized_file(data: bytes) -> SerializedFile:
         raise UnityFormatError(f"header file size {file_size} != actual {len(data)}")
     cursor = _Cursor(data, pos, endian)
 
-    end = data.index(b"\x00", cursor.pos)
+    end = data.find(b"\x00", cursor.pos, cursor.pos + 64)
+    if end < 0:
+        raise UnityFormatError("unterminated or over-long Unity version string in header")
     unity_version = data[cursor.pos:end].decode("ascii", errors="replace")
     cursor.pos = end + 1
     (_target_platform,) = cursor.unpack("i")
@@ -136,6 +138,14 @@ def parse_serialized_file(data: bytes) -> SerializedFile:
         if type_index < 0 or type_index >= type_count:
             raise UnityFormatError(f"object {path_id} type index {type_index} out of range (types={type_count})")
         objects.append(ObjectInfo(path_id=path_id, byte_start=absolute, byte_size=byte_size, type_index=type_index))
+
+    # Unity packs object bodies contiguously and never overlaps them. Rejecting overlap stops a
+    # hostile file from pointing many objects at one large body to force quadratic reads/writes.
+    for prev, nxt in zip(sorted(objects, key=lambda o: o.byte_start),
+                         sorted(objects, key=lambda o: o.byte_start)[1:]):
+        if nxt.byte_start < prev.byte_start + prev.byte_size:
+            raise UnityFormatError(
+                f"object bodies overlap ({prev.path_id} and {nxt.path_id}); malformed or hostile file")
 
     return SerializedFile(format_version=version, big_endian=(endian == ">"), unity_version=unity_version,
                           data_offset=data_offset, file_size=file_size, types=tuple(types), objects=tuple(objects))

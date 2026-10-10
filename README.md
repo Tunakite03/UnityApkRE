@@ -53,6 +53,8 @@ Skills:
 | `run <package> --workdir DIR` | `pull`, then `extract`, then `analyze` | `pull/`, `extracted/`, `analysis/` |
 | `summary DIR` | Re-prints the summary of an analysis | stdout |
 | `find DIR REGEX [--literals] [--context N]` | Searches identifiers or string literals | stdout (exit 1 = no match) |
+| `dump-il2cpp <root> --out DIR` | Categorised IL2CPP name tables from global-metadata.dat | `types.tsv`, `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, `sections.json` |
+| `export-assets <root> --out DIR` | Object index + TextAsset bytes + MonoScript table | `objects.jsonl`, `textassets/`, `monoscripts.tsv`, `assets_report.json` |
 
 Each command writes to a new or empty directory through a staging folder. A failed run leaves nothing behind, and earlier results are never overwritten. Errors exit with code 2 and a structured log line.
 
@@ -67,7 +69,9 @@ Each command writes to a new or empty directory through a staging folder. A fail
 
 ## Scope
 
-The toolkit reads and reports. It does not unpack, decrypt, patch, re-sign or repackage builds. It does not bypass packers, encrypted metadata or other protections; it detects them and says so.
+The toolkit reads documented formats and reports. It does not unpack, decrypt, patch, re-sign or repackage builds, and it does not bypass packers, encrypted metadata or other protections; it detects them and says so.
+
+Concretely, for IL2CPP it reads the `global-metadata.dat` definition tables and emits the type/method/field/property/event **names** that the format exposes. It does **not** reconstruct member-to-type grouping, signatures or code addresses — that needs Il2CppDumper/Il2CppInspector on an unpacked binary. For assets it extracts TextAsset data and indexes every object, but does not decode compressed textures/audio/meshes (use AssetRipper/UnityPy). Obfuscated name entries are reported and left empty, never guessed.
 
 Use it on apps installed on your own device and comply with the app's terms.
 

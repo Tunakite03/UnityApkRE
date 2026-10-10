@@ -48,6 +48,7 @@ _TABLES: dict[str, tuple[int, int, int]] = {
 }
 _TYPE_NAMESPACE_OFFSET = 4  # Il2CppTypeDefinition: nameIndex@0, namespaceIndex@4
 _VALIDATION_SAMPLE = 4000
+_MAX_IDENTIFIER = 1024  # a managed identifier longer than this is treated as not-a-name
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ def _string_at(heap: bytes, index: int) -> str | None:
         return None
     if index > 0 and heap[index - 1] != 0:
         return None
-    end = heap.find(b"\x00", index)
+    end = heap.find(b"\x00", index, index + _MAX_IDENTIFIER + 1)
     if end < 0:
         return None
     try:
@@ -89,7 +90,7 @@ def _validate(data: bytes, heap: bytes, section: tuple[int, int], stride: int, n
     offset, size = section
     count = size // stride
     if count == 0:
-        return 0.0
+        return 1.0  # an empty table is vacuously valid
     step = max(1, count // _VALIDATION_SAMPLE)
     checked = ok = 0
     for i in range(0, count, step):

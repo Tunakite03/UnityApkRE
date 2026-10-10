@@ -6,7 +6,7 @@ Lệnh chạy là `scripts/uare` (Windows: `scripts\uare.cmd`). Chỉ cần Pyth
 
 ## Bước 0: Chuẩn bị điện thoại
 
-1. Vào **Cài đặt → Thông tin điện thoại**, chạm 7 lần vào "Số bản dựng" (MIUI: "Phiên bản MIUI") để bật **Tùy chọn nhà phát triển**.
+1. Vào **Cài đặt → Thông tin điện thoại**, chạm 7 lần vào "Số bản dựng" để bật **Tùy chọn nhà phát triển**.
 2. Trong Tùy chọn nhà phát triển, bật **Gỡ lỗi USB**. Trên Xiaomi, bật thêm "Gỡ lỗi USB (Cài đặt bảo mật)" nếu có.
 3. Cắm cáp USB loại truyền được dữ liệu.
 4. Khi điện thoại hỏi "Cho phép gỡ lỗi USB?", bấm **Cho phép**.
@@ -129,6 +129,39 @@ scripts/uare find re/rollinghero/analysis '(?i)buy|price' --literals --context 2
   - mã thoát: 0 = có kết quả, 1 = không có, 2 = lỗi.
 
 Ý nghĩa đầy đủ của từng trường trong `report.json`: [skills/explore-il2cpp/references/report-fields.md](../skills/explore-il2cpp/references/report-fields.md)
+
+## Bước 7: `dump-il2cpp` và `export-assets`, lấy tên và dữ liệu
+
+```bash
+scripts/uare dump-il2cpp re/rollinghero/extracted --out re/rollinghero/il2cpp
+scripts/uare export-assets re/rollinghero/extracted --out re/rollinghero/assets
+```
+
+**`dump-il2cpp`** đọc `global-metadata.dat` và phân loại tên thành từng bảng riêng:
+
+| File | Nội dung |
+|---|---|
+| `types.tsv` | `chỉ_số <TAB> namespace <TAB> tên` cho mọi class |
+| `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv` | `chỉ_số <TAB> tên` cho từng loại thành viên |
+| `sections.json` | phiên bản metadata + offset/size của 31 section (để nạp vào công cụ khác) |
+
+Đây là dạng có phân loại của đống tên mà `analyze` đổ ra phẳng. Ví dụ `events.tsv` của Rolling Hero có `OnGameEnd`, `FlightStarted`, `RewardMultiplierChanged`; `types.tsv` có `ShopPage`, `DeokjaShopView`, `SeasonEventLobbyView`. Số tên bị obfuscate được báo rõ và để trống, **không đoán**.
+
+**`export-assets`** đọc mọi SerializedFile và xuất ra:
+
+| File | Nội dung |
+|---|---|
+| `objects.jsonl` | mỗi object một dòng: file, pathID, class, tên, kích thước — bản kiểm kê asset đầy đủ |
+| `textassets/` | byte của từng TextAsset, đặt tên theo m_Name — **dữ liệu cấu hình game** (CSV/JSON/Lua) |
+| `monoscripts.tsv` | `file, pathID, tên, class, namespace, assembly` của mỗi MonoScript — nối asset với tên class IL2CPP |
+| `assets_report.json` | số lượng object theo từng class |
+
+Trên Rolling Hero, `textassets/` ra đúng các bảng cân bằng game: `StarChallenge`, `AfkConfig`, `ClawCraneMinigame`… dạng CSV đọc thẳng được.
+
+### Giới hạn (nói thật)
+
+- **Không gom thành viên theo class, không có chữ ký.** `dump-il2cpp` chỉ ra danh sách tên phẳng theo từng loại. Việc method/field nào thuộc class nào, kiểu tham số, kiểu trả về, địa chỉ hàm — cần Il2CppDumper/Il2CppInspector chạy trên binary **đã gỡ pack**. Với `libil2cpp.so` bị pack (như Rolling Hero), chính các công cụ đó cũng cần binary được gỡ pack trước, và plugin này không làm việc đó.
+- **Không giải mã media.** `export-assets` lấy được byte TextAsset và kiểm kê mọi object, nhưng không giải mã texture/audio/mesh nén (cần codec ETC/ASTC/Vorbis). Dùng AssetRipper/UnityPy cho phần đó; bản kiểm kê đã cho biết tên và kích thước.
 
 ## Nguyên tắc an toàn của công cụ
 

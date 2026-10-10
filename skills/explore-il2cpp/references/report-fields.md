@@ -1,4 +1,27 @@
-# report.json fields
+# Output files
+
+## `uare dump-il2cpp` (il2cpp/ directory)
+
+| File | Content |
+|---|---|
+| `types.tsv` | `index<TAB>namespace<TAB>name` for every type definition |
+| `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv` | `index<TAB>name` per definition |
+| `sections.json` | metadata version + the 31 section offsets/sizes (feed to other tools) |
+
+Names are taken from each record's nameIndex. Unreadable (obfuscated/blob) entries are emitted as empty and counted in the command's summary. There is no member-to-type grouping or signature info here — see the skill's Limits.
+
+## `uare export-assets` (assets/ directory)
+
+| File | Content |
+|---|---|
+| `objects.jsonl` | one record per object: `file`, `path_id`, `class_id`, `class_name`, `name`, `byte_size` |
+| `textassets/` | each TextAsset's raw bytes, named after m_Name (CSV/JSON/Lua/config data) |
+| `monoscripts.tsv` | `file<TAB>path_id<TAB>name<TAB>class<TAB>namespace<TAB>assembly` per MonoScript |
+| `assets_report.json` | per-class object counts, serialized-file and bundle counts |
+
+`name` is filled only for types whose body begins with m_Name (Texture2D, TextAsset, AudioClip, Mesh, Sprite, Shader, Font, MonoScript, ...); other objects have an empty name. Bundles under `assets/aa` (Addressables) are counted but not unpacked.
+
+# report.json fields (uare analyze)
 
 `uare analyze` writes these files to the analysis directory:
 

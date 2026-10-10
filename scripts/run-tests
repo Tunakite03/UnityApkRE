@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the unit tests. Set UARE_REAL_DATA_DIR to a Unity Data directory to include the real-data smoke test.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/src" "${UARE_PYTHON:-python3}" -m unittest discover -s tests -t tests "$@"

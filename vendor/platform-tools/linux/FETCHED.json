@@ -1,0 +1,13 @@
+{
+  "platform": "linux",
+  "url": "https://dl.google.com/android/repository/platform-tools-latest-linux.zip",
+  "archive_sha256": "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1",
+  "archive_size": 9054187,
+  "revision": "37.0.1",
+  "fetched_at": "2026-10-10T16:41:15.200137+00:00",
+  "files": {
+    "adb": "a902be8f45c6c62e76c9efaf6947a0fa747c9cabd89a2ac8e0d16ecb30b3ed01",
+    "NOTICE.txt": "c29da8f704720fa1d3d802b834b86d9c023f20ae2596a8f2a4e17ed5490b17ae",
+    "source.properties": "2dccd788c0234d8cf7f7457377e57f57527a86a629c6ed54feb8af0f549dac38"
+  }
+}

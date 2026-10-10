@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run the uare CLI straight from a checkout or an installed Claude Code plugin (no pip install needed).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="${UARE_PYTHON:-$(command -v python3 || true)}"
+
+if [[ -z "$PYTHON" ]]; then
+  echo "uare: python3 >= 3.10 not found on PATH; set UARE_PYTHON to an interpreter" >&2
+  exit 127
+fi
+if ! "$PYTHON" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  echo "uare: $PYTHON is older than Python 3.10" >&2
+  exit 127
+fi
+
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONDONTWRITEBYTECODE=1
+# `-c` + runpy instead of `-m`: drop the current directory from sys.path so files in the
+# work directory (extracted game data, cloned repos) can never shadow uare or the stdlib.
+exec "$PYTHON" -c 'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; import runpy; runpy.run_module("uare", run_name="__main__", alter_sys=True)' "$@"

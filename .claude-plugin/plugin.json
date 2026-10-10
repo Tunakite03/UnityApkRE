@@ -1,0 +1,17 @@
+{
+  "name": "unity-apk-re",
+  "version": "0.3.0",
+  "description": "Static recon of Unity Android games: pull APK splits/OBBs over a bundled adb, merge them, and report on Unity data, IL2CPP metadata and native libraries.",
+  "author": {
+    "name": "tunakite03"
+  },
+  "license": "MIT",
+  "keywords": [
+    "unity",
+    "android",
+    "adb",
+    "apk",
+    "il2cpp",
+    "reverse-engineering"
+  ]
+}

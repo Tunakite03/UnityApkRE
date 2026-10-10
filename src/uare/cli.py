@@ -1,0 +1,262 @@
+"""Command line: uare {doctor,fetch-adb,devices,packages,pull,extract,analyze,run,summary,find,
+dump-il2cpp,export-assets}."""
+
+import argparse
+import json
+import logging
+import os
+import platform as host
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import Sequence
+
+from uare import __version__, logs
+from uare.adb import AdbClient, AdbConfig, pull_package, subprocess_runner
+from uare.analyze import analyze, load_report, resolve_layout, summarize
+from uare.apk import extract_apk_set
+from uare.assets import analyze_assets, summarize_assets
+from uare.errors import UareError
+from uare.il2cpp_dump import dump_definitions
+from uare.outdir import staged_output
+from uare.platform_tools import (
+    DEFAULT_VENDOR_ROOT,
+    PLATFORMS,
+    adb_version,
+    fetch_platform,
+    host_platform,
+    official_url,
+    path_lookup,
+    resolve_adb,
+    ssl_context,
+)
+from uare.search import format_hits, search_identifiers, search_literals
+
+LOG = logging.getLogger("uare.cli")
+
+
+def _path_lookup(name: str) -> str | None:
+    return path_lookup(name, os.environ.get("PATH", ""))
+
+
+def _resolved_adb(args: argparse.Namespace) -> str:
+    resolved = resolve_adb(args.adb, os.environ, DEFAULT_VENDOR_ROOT, host_platform(), _path_lookup)
+    logs.event(LOG, logging.DEBUG, "adb_resolved", path=resolved.path, source=resolved.source)
+    return resolved.path
+
+
+def _adb_client(args: argparse.Namespace) -> AdbClient:
+    config = AdbConfig(adb_path=_resolved_adb(args), serial=args.serial, timeout_s=args.timeout,
+                       pull_timeout_s=args.pull_timeout, retries=args.retries, backoff_s=1.0)
+    return AdbClient(config, subprocess_runner)
+
+
+def _archives_in(pull_dir: Path) -> list[Path]:
+    archives = sorted((pull_dir / "apks").glob("*.apk")) + sorted((pull_dir / "obb").glob("*.obb"))
+    if not archives:
+        raise UareError(f"no .apk or .obb files under {pull_dir}")
+    return archives
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    print(f"uare              : {__version__}")
+    print(f"python            : {sys.version.split()[0]} ({host.machine()})")
+    print(f"host platform     : {host_platform()}")
+    resolved = resolve_adb(args.adb, os.environ, DEFAULT_VENDOR_ROOT, host_platform(), _path_lookup)
+    print(f"adb               : {resolved.path} [{resolved.source}]")
+    print(f"adb version       : {adb_version(resolved.path)}")
+    devices = _adb_client(args).devices()
+    if not devices:
+        print("devices           : none (connect a phone with USB debugging enabled)")
+    for device in devices:
+        print(f"device            : {device.serial}\t{device.state}")
+    return 0
+
+
+def cmd_fetch_adb(args: argparse.Namespace) -> int:
+    platforms = PLATFORMS if args.platform == "all" else (args.platform or host_platform(),)
+    if args.sha256 and len(platforms) != 1:
+        raise UareError("--sha256 pins one archive; combine it with a single --platform")
+    context = ssl_context(os.environ)
+    vendor_root = Path(args.vendor_dir)
+    for name in platforms:
+        record = fetch_platform(name, official_url(name), vendor_root, args.sha256, context)
+        print(f"{name}: platform-tools {record.revision} -> {vendor_root / name} (zip sha256 {record.archive_sha256})")
+    return 0
+
+
+def cmd_devices(args: argparse.Namespace) -> int:
+    for device in _adb_client(args).devices():
+        print(f"{device.serial}\t{device.state}")
+    return 0
+
+
+def cmd_packages(args: argparse.Namespace) -> int:
+    client = _adb_client(args)
+    client.select()
+    for name in client.third_party_packages():
+        if args.filter is None or args.filter.lower() in name.lower():
+            print(name)
+    return 0
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    manifest = pull_package(_adb_client(args), args.package, Path(args.out))
+    print(json.dumps(asdict(manifest), indent=2))
+    return 0
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    inputs = [Path(p) for p in args.archives]
+    if len(inputs) == 1 and inputs[0].is_dir():
+        inputs = _archives_in(inputs[0])
+    result = extract_apk_set(inputs, Path(args.out))
+    print(f"wrote {result.files_written} files ({result.bytes_written} bytes), merged "
+          f"{len(result.merged_split_files)} split files, abis {list(result.abis)} -> {result.out_dir}")
+    return 0
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    report = analyze(Path(args.root), Path(args.out))
+    print("\n".join(summarize(asdict(report))))
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir)
+    pull_dir, extract_dir, analysis_dir = workdir / "pull", workdir / "extracted", workdir / "analysis"
+    pull_package(_adb_client(args), args.package, pull_dir)
+    extract_apk_set(_archives_in(pull_dir), extract_dir)
+    report = analyze(extract_dir, analysis_dir)
+    print("\n".join(summarize(asdict(report))))
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    print("\n".join(summarize(load_report(Path(args.analysis_dir)))))
+    return 0
+
+
+def cmd_dump_il2cpp(args: argparse.Namespace) -> int:
+    layout = resolve_layout(Path(args.root))
+    metadata = layout.data_dir / "Managed" / "Metadata" / "global-metadata.dat"
+    if not metadata.is_file():
+        raise UareError(f"{metadata} not found; this build has no IL2CPP metadata (Mono or non-Unity?)")
+    out_dir = Path(args.out)
+    with staged_output(out_dir) as staging:
+        result = dump_definitions(metadata, staging)
+    print(f"metadata v{result.version} -> {out_dir}")
+    for table in result.tables:
+        suffix = f" ({table.unreadable} names unreadable)" if table.unreadable else ""
+        print(f"  {table.name:<11}: {table.count}{suffix} -> {table.path}")
+    print(result.note)
+    return 0
+
+
+def cmd_export_assets(args: argparse.Namespace) -> int:
+    result = analyze_assets(Path(args.root), Path(args.out))
+    print("\n".join(summarize_assets(result)))
+    return 0
+
+
+def cmd_find(args: argparse.Namespace) -> int:
+    search = search_literals if args.literals else search_identifiers
+    hits = search(Path(args.analysis_dir), args.pattern, args.context, args.limit)
+    if not hits:
+        print(f"no match for {args.pattern!r}")
+        return 1
+    print("\n".join(format_hits(hits)))
+    return 0
+
+
+def _add_adb_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--serial", help="device serial (required when several devices are connected)")
+    parser.add_argument("--adb", help="adb binary (default: UARE_ADB, then vendored, then PATH)")
+    parser.add_argument("--timeout", type=float, default=120.0, help="timeout for non-transfer adb commands (s)")
+    parser.add_argument("--pull-timeout", type=float, default=7200.0, help="timeout for each adb pull (s)")
+    parser.add_argument("--retries", type=int, default=2, help="retries for transient adb failures")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="uare", description="Unity Android build reverse-engineering toolkit")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("doctor", help="show which adb is used, its version, and connected devices")
+    _add_adb_options(p)
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("fetch-adb", help="download official platform-tools adb into vendor/")
+    p.add_argument("--platform", choices=(*PLATFORMS, "all"), help="default: host platform")
+    p.add_argument("--sha256", help="expected sha256 of the downloaded zip (single platform only)")
+    p.add_argument("--vendor-dir", default=str(DEFAULT_VENDOR_ROOT), help="default: %(default)s")
+    p.set_defaults(func=cmd_fetch_adb)
+
+    p = sub.add_parser("devices", help="list adb devices")
+    _add_adb_options(p)
+    p.set_defaults(func=cmd_devices)
+
+    p = sub.add_parser("packages", help="list third-party packages on the device")
+    _add_adb_options(p)
+    p.add_argument("--filter", help="case-insensitive substring")
+    p.set_defaults(func=cmd_packages)
+
+    p = sub.add_parser("pull", help="pull all APK splits and OBBs of a package")
+    _add_adb_options(p)
+    p.add_argument("package")
+    p.add_argument("--out", required=True, help="empty directory for apks/, obb/, manifest.json")
+    p.set_defaults(func=cmd_pull)
+
+    p = sub.add_parser("extract", help="merge an APK set into one tree (Data/, lib/, assets/, archives/)")
+    p.add_argument("archives", nargs="+", help=".apk/.obb files, or a `uare pull` directory")
+    p.add_argument("--out", required=True, help="empty output directory")
+    p.set_defaults(func=cmd_extract)
+
+    p = sub.add_parser("analyze", help="report on an extracted tree or a raw Unity Data directory")
+    p.add_argument("root")
+    p.add_argument("--out", required=True, help="empty directory for report.json and detail files")
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("run", help="pull + extract + analyze into one work directory")
+    _add_adb_options(p)
+    p.add_argument("package")
+    p.add_argument("--workdir", required=True, help="directory that will hold pull/, extracted/, analysis/")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("summary", help="print the summary of an existing analysis directory")
+    p.add_argument("analysis_dir")
+    p.set_defaults(func=cmd_summary)
+
+    p = sub.add_parser("dump-il2cpp", help="categorised IL2CPP name tables (types, methods, fields, ...)")
+    p.add_argument("root", help="extracted tree or Unity Data directory")
+    p.add_argument("--out", required=True, help="empty directory for the *.tsv name tables")
+    p.set_defaults(func=cmd_dump_il2cpp)
+
+    p = sub.add_parser("export-assets", help="object index + TextAsset bytes + MonoScript table")
+    p.add_argument("root", help="extracted tree or Unity Data directory")
+    p.add_argument("--out", required=True, help="empty directory for objects.jsonl, textassets/, ...")
+    p.set_defaults(func=cmd_export_assets)
+
+    p = sub.add_parser("find", help="regex search IL2CPP identifiers (or string literals) of an analysis")
+    p.add_argument("analysis_dir")
+    p.add_argument("pattern", help="Python regular expression")
+    p.add_argument("--literals", action="store_true", help="search string_literals.jsonl instead of identifiers")
+    p.add_argument("--context", type=int, default=0, help="rows of context around each match")
+    p.add_argument("--limit", type=int, default=50, help="maximum matches")
+    p.set_defaults(func=cmd_find)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logs.configure(logging.DEBUG if args.verbose else logging.INFO)
+    try:
+        return args.func(args)
+    except UareError as exc:
+        logs.event(LOG, logging.ERROR, "command_failed", command=args.command, error_type=type(exc).__name__,
+                   error=str(exc))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

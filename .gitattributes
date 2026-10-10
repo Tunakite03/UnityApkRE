@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.cmd text eol=crlf
+vendor/platform-tools/** binary
+vendor/platform-tools/**/*.json text eol=lf
+vendor/platform-tools/**/*.txt text
+vendor/platform-tools/**/*.properties text

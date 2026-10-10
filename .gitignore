@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Pull/extract/analysis output: game data stays local
+/re/
+.*.partial/
+
+.DS_Store

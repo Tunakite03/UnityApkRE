@@ -1,0 +1,15 @@
+{
+  "name": "unity-apk-re",
+  "owner": {
+    "name": "tunakite03"
+  },
+  "description": "Unity Android reverse-engineering toolkit for Claude Code.",
+  "plugins": [
+    {
+      "name": "unity-apk-re",
+      "source": "./",
+      "description": "adb pull + APK-set extraction + Unity/IL2CPP/ELF reports, with skills for the full workflow.",
+      "tags": ["unity", "android", "il2cpp", "reverse-engineering"]
+    }
+  ]
+}

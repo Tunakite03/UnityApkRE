@@ -12,7 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # Power mode: open AssetBundles, decode textures/audio/mesh, read MonoBehaviours with a type tree.
-power = ["UnityPy>=1.20", "Pillow>=10"]
+power = ["UnityPy>=1.20", "Pillow>=10", "fmod_toolkit>=0.1"]
 
 [project.scripts]
 uare = "uare.cli:main"

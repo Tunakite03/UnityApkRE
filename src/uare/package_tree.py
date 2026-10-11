@@ -22,6 +22,7 @@ import importlib
 import json
 import logging
 import re
+import shutil
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -373,7 +374,9 @@ def _candidates(layout: Layout) -> list[Path]:
         for path in directory.rglob("*"):
             if not path.is_file():
                 continue
-            if bundle_offset(path.read_bytes()[:_SIGNATURE_SCAN]) is not None:
+            with path.open("rb") as handle:
+                head = handle.read(_SIGNATURE_SCAN)
+            if bundle_offset(head) is not None:
                 found.add(path)
             elif path.suffix in (".assets", ".unity") or (path.suffix == "" and path.parent == layout.data_dir):
                 found.add(path)
@@ -439,25 +442,29 @@ class _Packager:
             exported: dict[int, str] = {}
             pending: list[Any] = []
             for obj in objs:
-                cls = _class_name(obj)
-                if cls == "MonoScript":
-                    self._write_monoscript_row(rel, obj)
-                    continue
-                category = self._category(obj, cls)
-                if category is None:
-                    pending.append(obj)
-                    continue
-                stem_name = _object_name(obj) or f"{cls}_{obj.path_id}"
-                directory = self._staging / "scripts" / "hotdll" if category == "scripts" \
-                    else self._staging / "assets" / category / group
-                stem = _unique(_sanitize(stem_name), obj.path_id, self._used[str(directory)])
                 try:
+                    cls = _class_name(obj)
+                    if cls == "MonoScript":
+                        self._write_monoscript_row(rel, obj)
+                        continue
+                    category = self._category(obj, cls)
+                    if category is None:
+                        pending.append(obj)
+                        continue
+                    directory = self._staging / "scripts" / "hotdll" if category == "scripts" \
+                        else self._staging / "assets" / category / group
+                    stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
+                                   self._used[str(directory)])
                     if cls == "TextAsset" and category == "audio":
                         target, note = _export_fev_bank(_as_bytes(obj.read().m_Script), directory, stem)
                     else:
                         target, note = _export_object(obj, cls, directory, stem)
                 except _FAILURES as exc:
-                    target, note = None, f"{type(exc).__name__}: {exc}"
+                    self._record(rel, obj, "unclassified", None, f"{type(exc).__name__}: {exc}")
+                    continue
+                except Exception as exc:  # one object must not stop the run; its reason goes to the catalog
+                    self._record(rel, obj, "unclassified", None, f"unexpected {type(exc).__name__}: {exc}")
+                    continue
                 if target is not None:
                     exported[obj.path_id] = target.relative_to(self._staging).as_posix()
                 self._record(rel, obj, category, target, note)
@@ -506,18 +513,19 @@ class _Packager:
 
     def _record(self, rel: str, obj: Any, category: str, target: Path | None, note: str | None,
                 output: str | None = None) -> None:
+        """One catalog entry per object. `target` is the file written for it, `output` a shared file."""
+        size = 0
         if target is not None:
             output = target.relative_to(self._staging).as_posix()
             size = target.stat().st_size
+        if output is None:
+            self._counts["_skipped"] += 1
+        else:
             self._counts[category] += 1
             if category == "scripts":
                 self._hotdll += 1
-            if category not in ("monoscripts", "components"):
+            if category not in ("monoscripts",):
                 self._exported += 1
-        else:
-            size = 0
-            if output is None:
-                self._counts["_skipped"] += 1
         self._catalog.append(CatalogEntry(obj.path_id, _class_name(obj), _object_name(obj), category, rel,
                                           output, size, note))
 

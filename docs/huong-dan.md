@@ -215,33 +215,42 @@ Kết quả:
 - `--backend auto` mặc định: dùng UnityPy nếu đã cài, ngược lại rơi về backend stdlib.
 - Địa chỉ trong `functions.tsv` khớp RVA trong `methods_rva.tsv`, nên ghép được tên method với pseudo-C.
 
-### Bước 10: `package` — cây tài nguyên chuẩn RE
+### Bước 10: `package` — xuất đầy đủ asset
 
-`export-assets` chỉ là bản kiểm kê phẳng. `package` sắp lại mọi object theo đúng cách đọc của RE:
+`run` đã chạy bước này sau khi analyze, và ghi vào `<workdir>/extracted-assets/`. Cần UnityPy: `pip install "uare[power]"`. Nếu thiếu, `run` báo lỗi ngay trước khi kéo APK từ máy, không kéo dở rồi mới lỗi.
+
+Chạy riêng trên cây đã giải nén:
+
+```bash
+scripts/uare package <workdir>/extracted --out <workdir>/extracted-assets
+```
 
 ```
-packaged/
+extracted-assets/
   assets/
-    sprites/      ảnh sprite đã cắt (PNG)          textures/  Texture2D (PNG)
-    fonts/        TTF/OTF nhúng sẵn                audio/     AudioClip (WAV)
-    videos/       VideoClip                        animations/ AnimationClip (JSON curve)
-    spines/       Spine: *.atlas + *.skel + *_SkeletonData.json
-    meshes/       Mesh (OBJ)                       materials/ Material (JSON)
-    shaders/      Shader                           textassets/ TextAsset (config/JSON/CSV)
-    monobehaviours/ MonoBehaviour (JSON nếu có type tree)
+    sprites/<nhóm>/       sprite (PNG)              textures/<nhóm>/  Texture2D (PNG)
+    fonts/<nhóm>/         TTF/OTF nhúng sẵn        audio/<nhóm>/     AudioClip (WAV) + FMOD bank (.bank, subsound WAV trong thư mục con)
+    animations/<nhóm>/    AnimationClip (JSON)     animators/<nhóm>/ AnimatorController (JSON)
+    spines/<nhóm>/        Spine: *.atlas + *.skel + *_SkeletonData.json
+    meshes/<nhóm>/        Mesh (OBJ)               materials/<nhóm>/ Material (JSON)
+    shaders/<nhóm>/       Shader (JSON)            textassets/<nhóm>/ TextAsset (config/JSON/CSV)
+    monobehaviours/<nhóm>/ MonoBehaviour (JSON)    manifests/<nhóm>/ AssetBundle, PreloadData, SpriteAtlas
+    prefabs/<nhóm>/       cây GameObject + component của mỗi bundle prefab (JSON)
+    objects/<class>/<nhóm>/  các class khác, dạng type-tree JSON
   scripts/
-    hotdll/            các assembly .NET hot-update: GamePlay.dll, GameCore.dll, GameConfig.dll...
-                       -> decompile bằng ILSpy/dnSpy = logic gameplay
-    monoscripts.tsv    ánh xạ asset -> class IL2CPP
+    hotdll/               assembly hot-update (vẫn ở dạng mã hóa, xem bên dưới)
+    monoscripts.tsv       ánh xạ asset -> class IL2CPP
   scenes/<levelN>/hierarchy.json   cây GameObject của scene
-  prefabs/  hierarchies/           cây GameObject của prefab / mọi file
-  catalog.json    mọi object: class, name, category, source, output, note
-  index.html      xem/thống kê được (lọc theo class/name/source)
-  report.json     số lượng + lý do bỏ qua
+  catalog.json            mọi object: class, name, category, source, output hoặc note (lý do)
+  index.html              xem/lọc được (lọc theo class/name/source/category)
+  report.json             số lượng + lỗi theo file
 ```
 
-- **Mở được cả bundle YooAsset**: nhiều game (như Tower Pet) chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì** — nhờ vậy mở được 1547/1569 bundle thay vì 22.
-- Object nào không giải mã được (texture stream ngoài, object đọc lỗi) đều ghi vào `catalog.json` kèm lý do, không bỏ im lặng.
+`<nhóm>` lấy từ tên bundle YooAsset (bốn token đầu, bỏ tiền tố `gamepackage_` và mã hash), ví dụ `assets_gameassets_sprite_pet/`. Các object cùng bundle nằm cùng thư mục.
+
+- **Mở được cả bundle YooAsset**: nhiều game (như Tower Pet) chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì**.
+- **Hot-update DLL**: `GameHotfix_*.dll` trong bundle vẫn ở dạng mã hóa (không có header PE). `package` giữ nguyên, không giải mã.
+- Object nào không xuất được (texture placeholder 0×0, type tree lỗi...) đều ghi vào `catalog.json` kèm lý do, không bỏ im lặng.
 - `index.html` mở bằng trình duyệt để duyệt thẳng (ảnh có thumbnail).
 
 **`export-assets`** đọc mọi SerializedFile và xuất ra:

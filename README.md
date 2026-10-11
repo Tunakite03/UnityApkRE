@@ -19,7 +19,7 @@ Requirements: Python 3.10+, standard library only. adb is bundled for macOS, Lin
 git clone <this repo> unity-apk-re && cd unity-apk-re
 scripts/uare doctor                                   # which adb, its version, connected devices
 scripts/uare packages --filter hero                   # find the package id
-scripts/uare run com.example.game --workdir re/game   # pull + extract + analyze
+scripts/uare run com.example.game --workdir re/game   # pull + extract + analyze + full asset export
 scripts/uare find re/game/analysis '(?i)shop' --context 6
 ```
 
@@ -39,6 +39,7 @@ Skills:
 | `/unity-apk-re:analyze-apk` | The whole pipeline, from a phone or from local .apk/.obb files, and how to read the result |
 | `/unity-apk-re:pull-from-device` | Pulling splits and OBBs, and fixing device states (unauthorized, offline, ...) |
 | `/unity-apk-re:explore-il2cpp` | Searching names and string literals, and explaining `report.json` |
+| `/unity-apk-re:operate-and-test` | Guides an agent through `uare plan` (dry run), the offline tests, and checking existing outputs, without touching a device |
 
 ## Commands
 
@@ -50,12 +51,13 @@ Skills:
 | `pull <package> --out DIR` | `pm path` + OBB listing + `adb pull` of every file | `apks/`, `obb/`, `manifest.json` |
 | `extract <apks/obbs or pull dir> --out DIR` | Merges splits, concatenates `.splitN`, rejects unsafe entries | `Data/`, `lib/<abi>/`, `assets/`, `archives/<apk>/`, `extraction.json` |
 | `analyze <extracted dir or Unity Data dir> --out DIR` | Inventory, backend, IL2CPP tables, ELF report | `report.json`, `files.jsonl`, `assets_files.jsonl`, `il2cpp/` |
-| `run <package> --workdir DIR` | `pull`, then `extract`, then `analyze` | `pull/`, `extracted/`, `analysis/` |
+| `run <package> --workdir DIR` | `pull`, `extract`, `analyze`, then the full asset export. Needs UnityPy (`pip install uare[power]`) and fails before pulling if it is missing | `pull/`, `extracted/`, `analysis/`, `extracted-assets/`, `manifest.json` (status of every stage, hashes of inputs and outputs, coverage and limitations; written even when a stage fails) |
+| `plan <package> --workdir DIR [--json]` | Dry run: ordered steps, exact commands, what each writes, and missing prerequisites. Reads local state only; no device, no writes | stdout (text, or JSON with `--json`) |
 | `summary DIR` | Re-prints the summary of an analysis | stdout |
 | `find DIR REGEX [--literals] [--context N]` | Searches identifiers or string literals | stdout (exit 1 = no match) |
 | `dump-il2cpp <root> --out DIR` | Categorised IL2CPP name tables + member grouping from global-metadata.dat | `types.tsv`, `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, `members.tsv`, `sections.json` |
 | `export-assets <root> --out DIR [--backend stdlib\|unitypy\|auto]` | Object index + TextAsset bytes + MonoScript table; `unitypy` also opens AssetBundles and decodes media | `objects.jsonl`, `textassets/`, `monoscripts.tsv`, `assets_report.json` (`unitypy` adds textures/audio/meshes/monobehaviours) |
-| `package <root> --out DIR` | RE-oriented tree: categorised assets + hierarchies + index (needs `uare[power]`) | `assets/{sprites,textures,fonts,audio,videos,animations,spines,meshes,materials,shaders,textassets,monobehaviours}/`, `scripts/hotdll/`, `scenes/`, `prefabs/`, `hierarchies/`, `catalog.json`, `index.html` |
+| `package <root> --out DIR` | Full asset export (needs `uare[power]`): every object read, grouped by category and source bundle, prefab/scene hierarchies, catalog | `assets/<category>/<bundle group>/`, `assets/prefabs/`, `assets/objects/`, `scenes/`, `scripts/`, `catalog.json`, `index.html`, `report.json` |
 | `recover-metadata <root> --out DIR [--key HEX] [--cmd CMD]` | Recover a wrapped `global-metadata.dat` (XOR or external decryptor), opt-in | `global-metadata.dat`, `recovery.json` |
 | `unpack-native <so> --out DIR [--cmd CMD]` | Identify a native packer; optionally run an external unpacker | `elf_report.json`, the unpacked `.so` |
 | `il2cpp-enrich <root> --out DIR [--dumper PATH]` | Run Il2CppDumper/Inspector: RVAs, signatures, `dump.cs` | `methods_rva.tsv`, `dump.cs`, `il2cpp.h`, `enrich_report.json` |
@@ -88,7 +90,7 @@ Neither is automatic; nothing is written unless you invoke them.
 
 For **unpacked** builds, four more commands extend the report without crossing any protection boundary: `il2cpp-enrich` (calls Il2CppDumper/Inspector for RVAs, signatures and `dump.cs`), `decompile` (Ghidra headless function list + C), the `--backend unitypy` mode of `export-assets`, and `package` (a categorised RE tree). External binaries are located via flags/env/`vendor/`/PATH and fetched with `fetch-tool`; the Python extra is `pip install uare[power]`.
 
-`package` opens plain `UnityFS` bundles **and** bundles whose `UnityFS` magic sits behind a short header prefix (common with YooAsset), by detecting and skipping the prefix — it does not decrypt. It sorts objects the way a reverse engineer reads them: `assets/sprites`, `textures`, `fonts` (TTF/OTF), `audio`, `videos`, `animations`, `spines` (atlas + skel + SkeletonData), `meshes` (OBJ), `materials`, `shaders`, `textassets`, `monobehaviours`; plus `scripts/hotdll/` (hot-update .NET assemblies = the game logic, decompile with ILSpy/dnSpy), `scenes|prefabs|hierarchies/` (GameObject trees), and a `catalog.json` + filterable `index.html`.
+`package` opens plain `UnityFS` bundles **and** bundles whose `UnityFS` magic sits behind a short header prefix (common with YooAsset), by detecting and skipping the prefix — it does not decrypt. Output is grouped twice: by category (`assets/sprites`, `textures`, `fonts`, `audio`, `animations`, `animators`, `spines`, `meshes`, `materials`, `shaders`, `textassets`, `monobehaviours`, `manifests`, `videos`) and then by source bundle (the first four tokens of the YooAsset bundle name, e.g. `assets_gameassets_sprite_pet/`). Prefabs are written as GameObject trees with their components to `assets/prefabs/`; scene hierarchies to `scenes/<level>/`. FMOD sound banks are copied as `.bank` and each sample container inside is decoded to WAV with fmod_toolkit. Objects without a dedicated exporter are written as type-tree JSON to `assets/objects/<class>/`. Every object read gets one `catalog.json` entry with its output file, or the reason it has none. Hot-update assemblies are kept in `scripts/hotdll/` as stored; they are not decrypted.
 
 Concretely, for IL2CPP, `dump-il2cpp` reads the `global-metadata.dat` definition tables and emits the type/method/field/property/event **names** that the format exposes, and groups methods/fields/properties/events under their declaring type (`members.tsv`) — the ranges for that come straight from the metadata, no binary needed. It does **not** resolve signatures, base/nested/interface names or code addresses: those need the `Il2CppType[]` array that lives in `libil2cpp.so`, so they are the job of Il2CppDumper/Il2CppInspector on an unpacked binary. For assets it extracts TextAsset data and indexes every object, but does not decode compressed textures/audio/meshes (use AssetRipper/UnityPy). Obfuscated name entries are reported and left empty, never guessed.
 
@@ -117,7 +119,7 @@ Layout:
   - `packers.py`: known native-packer signatures
   - `recover.py` / `external.py`: opt-in metadata recovery and external-tool hooks
   - `unitypy_backend.py`: UnityPy asset export (power extra)
-  - `package_tree.py`: RE-oriented categorised tree + hierarchy + catalog (power extra)
+  - `package_tree.py`: full asset export (categories, bundle groups, hierarchies, FMOD banks, catalog); requires UnityPy
   - `il2cpp_tools.py`: Il2CppDumper/Inspector adapter
   - `ghidra.py`: Ghidra headless decompilation
   - `tool_fetch.py`: download/unpack an external tool into vendor/

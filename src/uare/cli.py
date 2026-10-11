@@ -1,7 +1,9 @@
 """Command line: uare {doctor,fetch-adb,devices,packages,pull,extract,analyze,run,summary,find,
-dump-il2cpp,il2cpp-enrich,decompile,fetch-tool,recover-metadata,unpack-native,export-assets}."""
+dump-il2cpp,il2cpp-enrich,decompile,fetch-tool,recover-metadata,unpack-native,export-assets,
+rebuild,mono-decompile,il2cpp-annotate,generate-meta,recover-shaders,convert-scenes,extract-wwise}."""
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -27,14 +29,19 @@ from uare.il2cpp_tools import DEFAULT_VENDOR_ROOT as DUMPER_VENDOR_ROOT
 from uare.il2cpp_tools import enrich, resolve_dumper
 from uare.il2cpp_tools import summarize as summarize_enrich
 from uare.packers import identify_file
+from uare.plan import Prerequisites, asset_modules, build_plan, workdir_state
+from uare.plan import summarize as summarize_plan
 from uare.tool_fetch import fetch_archive
 from uare.outdir import staged_output
-from uare.package_tree import package
+from uare.package_tree import package, require_unitypy
+from uare.manifest import RunLog, write_manifest
+from uare.manifest import summarize as summarize_manifest
 from uare.package_tree import summarize as summarize_package
 from uare.recover import header_version, recover_file
 from uare.platform_tools import (
     DEFAULT_VENDOR_ROOT,
     PLATFORMS,
+    PlatformToolsError,
     adb_version,
     fetch_platform,
     host_platform,
@@ -136,12 +143,44 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    require_unitypy()  # checked first: a missing UnityPy must fail before anything is pulled
     workdir = Path(args.workdir)
     pull_dir, extract_dir, analysis_dir = workdir / "pull", workdir / "extracted", workdir / "analysis"
-    pull_package(_adb_client(args), args.package, pull_dir)
-    extract_apk_set(_archives_in(pull_dir), extract_dir)
-    report = analyze(extract_dir, analysis_dir)
-    print("\n".join(summarize(asdict(report))))
+    assets_dir = workdir / "extracted-assets"
+    run = RunLog()
+    try:
+        run.stage("pull", lambda: pull_package(_adb_client(args), args.package, pull_dir))
+        run.stage("extract", lambda: extract_apk_set(_archives_in(pull_dir), extract_dir))
+        report = run.stage("analyze", lambda: analyze(extract_dir, analysis_dir))
+        print("\n".join(summarize(asdict(report))))
+        result = run.stage("package", lambda: package(extract_dir, assets_dir))
+        print("\n".join(summarize_package(result)))
+    finally:
+        # Written on success and on failure: a failed run still says which stage stopped it.
+        if workdir.is_dir():
+            print("\n".join(summarize_manifest(write_manifest(workdir, run))))
+    return 0
+
+
+def _prerequisites(args: argparse.Namespace) -> Prerequisites:
+    """Local checks only: adb resolution, importable modules, workdir state. No device is contacted."""
+    adb = source = error = None
+    try:
+        resolved = resolve_adb(args.adb, os.environ, DEFAULT_VENDOR_ROOT, host_platform(), _path_lookup)
+        adb, source = resolved.path, resolved.source
+    except PlatformToolsError as exc:
+        error = str(exc)
+    missing = tuple(name for name in asset_modules() if importlib.util.find_spec(name) is None)
+    return Prerequisites(adb=adb, adb_source=source, adb_error=error, missing_modules=missing,
+                         workdir_state=workdir_state(Path(args.workdir)))
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    plan = build_plan(args.package, Path(args.workdir), _prerequisites(args))
+    if args.json:
+        print(json.dumps(asdict(plan), indent=2, ensure_ascii=False))
+    else:
+        print("\n".join(summarize_plan(plan)))
     return 0
 
 
@@ -282,6 +321,68 @@ def cmd_fetch_tool(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rebuild(args: argparse.Namespace) -> int:
+    from uare.rebuild import rebuild
+    from uare.rebuild import summarize as summarize_rebuild
+    result = rebuild(Path(args.workdir), Path(args.out))
+    print("\n".join(summarize_rebuild(result)))
+    return 0
+
+
+def cmd_mono_decompile(args: argparse.Namespace) -> int:
+    import shutil as _shutil
+    from uare.mono_decompile import decompile_all, resolve_decompiler, DEFAULT_VENDOR_ROOT as ILSPY_VENDOR
+    decompiler = resolve_decompiler(args.decompiler, os.environ, ILSPY_VENDOR,
+                                    lambda n: _shutil.which(n))
+    result = decompile_all(Path(args.managed), Path(args.out), decompiler)
+    from uare.mono_decompile import summarize as summarize_mono
+    print("\n".join(summarize_mono(result)))
+    return 0
+
+
+def cmd_il2cpp_annotate(args: argparse.Namespace) -> int:
+    from uare.il2cpp_merge import merge
+    from uare.il2cpp_merge import summarize as summarize_merge
+    enrich_dir = Path(args.enrich) if args.enrich else None
+    ghidra_dir = Path(args.ghidra_dir) if args.ghidra_dir else None
+    result = merge(Path(args.il2cpp_dir), enrich_dir, ghidra_dir, Path(args.out))
+    print("\n".join(summarize_merge(result)))
+    return 0
+
+
+def cmd_generate_meta(args: argparse.Namespace) -> int:
+    from uare.asset_import import generate_meta_tree
+    out = Path(args.out) if args.out else None
+    result = generate_meta_tree(Path(args.root), out)
+    print(f"processed {result.files_processed} files, {result.folders_processed} folders, "
+          f"wrote {result.meta_written} .meta files under {result.root}")
+    return 0
+
+
+def cmd_recover_shaders(args: argparse.Namespace) -> int:
+    from uare.shader_recover import recover_shaders
+    from uare.shader_recover import summarize as summarize_shaders
+    result = recover_shaders(Path(args.source), Path(args.out))
+    print("\n".join(summarize_shaders(result)))
+    return 0
+
+
+def cmd_convert_scenes(args: argparse.Namespace) -> int:
+    from uare.scene_convert import convert_scenes_and_prefabs
+    from uare.scene_convert import summarize as summarize_scenes
+    result = convert_scenes_and_prefabs(Path(args.source), Path(args.out))
+    print("\n".join(summarize_scenes(result)))
+    return 0
+
+
+def cmd_extract_wwise(args: argparse.Namespace) -> int:
+    from uare.wwise import extract_all
+    from uare.wwise import summarize as summarize_wwise
+    result = extract_all(Path(args.source), Path(args.out))
+    print("\n".join(summarize_wwise(result)))
+    return 0
+
+
 def cmd_find(args: argparse.Namespace) -> int:
     search = search_literals if args.literals else search_identifiers
     hits = search(Path(args.analysis_dir), args.pattern, args.context, args.limit)
@@ -340,11 +441,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, help="empty directory for report.json and detail files")
     p.set_defaults(func=cmd_analyze)
 
-    p = sub.add_parser("run", help="pull + extract + analyze into one work directory")
+    p = sub.add_parser("run", help="pull + extract + analyze + full asset export (needs UnityPy) into one work directory")
     _add_adb_options(p)
     p.add_argument("package")
     p.add_argument("--workdir", required=True, help="directory that will hold pull/, extracted/, analysis/")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("plan", help="dry run: list the steps, commands, outputs and missing prerequisites; touches nothing")
+    _add_adb_options(p)
+    p.add_argument("package")
+    p.add_argument("--workdir", required=True, help="the work directory the run would use")
+    p.add_argument("--json", action="store_true", help="print the plan as JSON (for agents)")
+    p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("summary", help="print the summary of an existing analysis directory")
     p.add_argument("analysis_dir")
@@ -383,7 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=7200.0, help="Ghidra timeout (s)")
     p.set_defaults(func=cmd_decompile)
 
-    p = sub.add_parser("package", help="RE layout: categorised assets + hierarchy + catalog + index")
+    p = sub.add_parser("package", help="full asset export (needs UnityPy): assets by category and bundle, prefabs, catalog")
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for assets/, scripts/, scenes/, catalog.json ...")
     p.set_defaults(func=cmd_package)
@@ -409,6 +517,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", choices=("auto", "stdlib", "unitypy"), default="auto",
                    help="stdlib (no deps) or unitypy (bundles + textures/audio/mesh, needs uare[power])")
     p.set_defaults(func=cmd_export_assets)
+
+    p = sub.add_parser("rebuild", help="create a Unity project from a completed uare run workdir")
+    p.add_argument("workdir", help="directory from a prior `uare run` (with analysis/, extracted-assets/, ...)")
+    p.add_argument("--out", required=True, help="empty directory for the Unity project")
+    p.set_defaults(func=cmd_rebuild)
+
+    p = sub.add_parser("mono-decompile", help="decompile Mono assemblies to C# via ILSpy")
+    p.add_argument("managed", help="path to the Managed/ directory containing .dll files")
+    p.add_argument("--out", required=True, help="empty directory for decompiled C# projects")
+    p.add_argument("--decompiler", help="ilspycmd binary (default: UARE_ILSPY, vendored, PATH)")
+    p.set_defaults(func=cmd_mono_decompile)
+
+    p = sub.add_parser("il2cpp-annotate", help="merge IL2CPP dump + RVA + Ghidra into annotated .cs stubs")
+    p.add_argument("il2cpp_dir", help="directory from `uare dump-il2cpp` (types.tsv, members.tsv)")
+    p.add_argument("--out", required=True, help="empty directory for annotated .cs stubs")
+    p.add_argument("--enrich", help="directory from `uare il2cpp-enrich` (methods_rva.tsv)")
+    p.add_argument("--ghidra-dir", help="directory from `uare decompile` (decompiled/*.c)")
+    p.set_defaults(func=cmd_il2cpp_annotate)
+
+    p = sub.add_parser("generate-meta", help="generate .meta files for all assets under a directory")
+    p.add_argument("root", help="directory containing assets")
+    p.add_argument("--out", help="output directory for .meta files (default: alongside originals)")
+    p.set_defaults(func=cmd_generate_meta)
+
+    p = sub.add_parser("recover-shaders", help="recover ShaderLab source from type-tree JSON exports")
+    p.add_argument("source", help="directory with shader JSON files (from `uare package`)")
+    p.add_argument("--out", required=True, help="empty directory for recovered .shader files")
+    p.set_defaults(func=cmd_recover_shaders)
+
+    p = sub.add_parser("convert-scenes", help="convert hierarchy JSON to Unity YAML scenes/prefabs")
+    p.add_argument("source", help="directory from `uare package` (with scenes/ and/or assets/prefabs/)")
+    p.add_argument("--out", required=True, help="empty directory for .unity and .prefab files")
+    p.set_defaults(func=cmd_convert_scenes)
+
+    p = sub.add_parser("extract-wwise", help="extract Wwise .bnk sound banks to individual WEM files")
+    p.add_argument("source", help="directory containing .bnk files (searched recursively)")
+    p.add_argument("--out", required=True, help="empty directory for extracted WEM files")
+    p.set_defaults(func=cmd_extract_wwise)
 
     p = sub.add_parser("find", help="regex search IL2CPP identifiers (or string literals) of an analysis")
     p.add_argument("analysis_dir")

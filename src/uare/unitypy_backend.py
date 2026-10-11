@@ -128,7 +128,7 @@ def _load(path: Path, unitypy: Any):
     with path.open("rb") as handle:
         head = handle.read(_SIGNATURE_SCAN)
     offset = bundle_offset(head)
-    if offset:
+    if offset is not None:
         return unitypy.load(path.read_bytes()[offset:])
     return unitypy.load(str(path))
 

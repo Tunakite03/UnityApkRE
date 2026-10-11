@@ -21,7 +21,7 @@ Every step writes to a **new or empty** directory and never overwrites. A failed
 
 1. **Preflight**: run `uare doctor`. It reports which adb is used (`--adb`, `UARE_ADB`, vendored, or PATH), its version, and connected devices. If a device is listed as anything but `device`, follow the device-state table in `../pull-from-device/SKILL.md` before continuing.
 2. **Acquire**. Pick one:
-   - From a phone, in one shot: `uare run <package> --workdir <dir>`. This runs pull, extract and analyze.
+   - From a phone, in one shot: `uare run <package> --workdir <dir>`. This runs pull, extract, analyze and the full asset export into `<dir>/extracted-assets/`. It needs UnityPy (`pip install "uare[power]"`) and stops before pulling if UnityPy is missing.
    - From a phone, step by step: `uare pull <package> --out <dir>/pull`. Use `uare packages --filter <word>` when the package id is unknown.
    - From local files: skip pull.
 3. **Extract**: `uare extract <dir>/pull --out <dir>/extracted`, or `uare extract base.apk split_*.apk main.*.obb --out ...`. This merges all splits, concatenates `assets/bin/Data/*.splitN`, and rejects unsafe or conflicting entries.

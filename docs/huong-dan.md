@@ -1,8 +1,23 @@
 # Hướng dẫn: unity-apk-re từng bước
 
+Plugin hướng dẫn AI agent reverse engineering và rebuild game Unity Android.
+
+Plugin này **hướng dẫn** AI agent qua quy trình tương tác: kéo APK từ điện thoại, giải nén và phân tích, báo cáo cho user, rồi tạo Unity project dựa trên quyết định của user. Plugin không làm hết -- nó dẫn đường cho agent, agent dùng các tool CLI đi kèm để xử lý binary format.
+
 Lệnh chạy là `scripts/uare` (Windows: `scripts\uare.cmd`). Chỉ cần Python 3.10 trở lên; mặc định chỉ dùng thư viện chuẩn. adb đã có sẵn trong `vendor/`.
 
 Muốn mở AssetBundle và giải mã texture/audio/mesh (chế độ "power"), cài thêm: `pip install "uare[power]"` (UnityPy + Pillow). Các tool ngoài (Il2CppDumper, Ghidra) không bắt buộc và không đi kèm; bạn trỏ tới chúng bằng `--dumper`/`--ghidra` hoặc tải vào `vendor/` bằng `fetch-tool`.
+
+## Quy trình chính (interactive workflow)
+
+Khi user nói **"Rebuild game với package:com.example.game"**, agent sẽ:
+
+1. **ACQUIRE** -- Kéo APK từ điện thoại qua adb
+2. **EXTRACT & RE** -- Giải nén, phân tích, reverse engineering
+3. **CHECKPOINT** -- Báo cáo cho user: phiên bản Unity, scripting backend, inventory asset, tình trạng bảo vệ. **Hỏi user** muốn rebuild kiểu gì (local only / backend stubs / full) và tập trung vào phần nào (UI / logic / assets only)
+4. **REBUILD** -- Tạo Unity project dựa trên câu trả lời của user
+
+Xem chi tiết: skill `/unity-apk-re:rebuild-game`
 
 ---
 
@@ -249,9 +264,23 @@ extracted-assets/
 `<nhóm>` lấy từ tên bundle YooAsset (bốn token đầu, bỏ tiền tố `gamepackage_` và mã hash), ví dụ `assets_gameassets_sprite_pet/`. Các object cùng bundle nằm cùng thư mục.
 
 - **Mở được cả bundle YooAsset**: nhiều game (như Tower Pet) chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì**.
-- **Hot-update DLL**: `GameHotfix_*.dll` trong bundle vẫn ở dạng mã hóa (không có header PE). `package` giữ nguyên, không giải mã.
+- **Hot-update DLL**: `GameHotfix_*.dll` trong bundle thường ở dạng mã hóa (không có header PE). `package` giữ nguyên; để giải mã, chạy `decrypt-hotdll` ở bước 11 bên dưới.
 - Object nào không xuất được (texture placeholder 0×0, type tree lỗi...) đều ghi vào `catalog.json` kèm lý do, không bỏ im lặng.
 - `index.html` mở bằng trình duyệt để duyệt thẳng (ảnh có thumbnail).
+
+### Bước 11 (tuỳ chọn): giải mã DLL hot-update — `decrypt-hotdll`
+
+Game dùng **HybridCLR** (hoặc tương tự) mã hóa các assembly hot-update thành `MAGIC || ciphertext` và giấu key trong chính metadata AOT: trình biên dịch C# đặt các mảng `new byte[]{...}` vào class `<PrivateImplementationDetails>`, **tên field chính là SHA-256 của dữ liệu**, giá trị nằm trong blob `fieldAndParameterDefaultValueData` của `global-metadata.dat`.
+
+```bash
+scripts/uare decrypt-hotdll re/towerpet/extracted-assets/scripts/hotdll --out re/towerpet/hotdll-decrypted
+```
+
+- Công cụ gom **mọi mảng constant** từ metadata, **tự kiểm chứng từng mảng bằng SHA-256 lấy từ tên field** (không đoán), rồi thử lần lượt AES-128-CBC / AES-128-GCM / ChaCha20 / RC4 / XOR với các độ dài magic thường gặp. Một tổ hợp chỉ được chấp nhận khi **cả file nhỏ nhất giải ra đúng PE** (và padding PKCS#7 khớp với CBC); không tìm được thì báo lỗi, không đoán.
+- Không cần `libil2cpp.so` — key nằm hoàn toàn trong metadata. Không cần cài thêm gì (AES/RC4/ChaCha20 có bản thuần Python); cài `pip install "uare[crypto]"` để chạy nhanh hơn với pycryptodome.
+- Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`.
+- Nếu game dùng thuật toán riêng: đưa key trực tiếp qua `--algo --key --iv --magic`.
+- Với Tower Pet: 219 mảng được kiểm chứng, tìm ra **AES-128-CBC** với key `419c...2cc3`, IV `1b8e...297e`, magic 8 byte `21f7ddab31690c08` — giải mã xong **19/19 DLL** (GamePlay, GameCore, UIResources, GameConfig, GameHotfix...), tức toàn bộ logic gameplay.
 
 **`export-assets`** đọc mọi SerializedFile và xuất ra:
 
@@ -272,7 +301,7 @@ Trên Rolling Hero, `textassets/` ra đúng các bảng cân bằng game: `StarC
 - **Tên obfuscate để trống.** Vài build xáo chỉ số tên; công cụ đếm và để trống, **không đoán**.
 - **Không giải mã media.** `export-assets` lấy được byte TextAsset và kiểm kê mọi object, nhưng không giải mã texture/audio/mesh nén (cần codec ETC/ASTC/Vorbis). Dùng AssetRipper/UnityPy cho phần đó; bản kiểm kê đã cho biết tên và kích thước.
 - **Không tự mở AssetBundle.** Bundle `UnityFS` dưới `assets/aa` chỉ được đếm, không giải nén.
-- **Phục hồi chỉ cho lớp bọc đơn giản.** `recover-metadata` chỉ gỡ được XOR (1–4 byte) hoặc qua `--cmd`; mã hoá mạnh hơn cần decryptor riêng của bạn. `unpack-native` chỉ *nhận diện* packer; muốn mở phải tự đưa `--cmd`.
+- **Phục hồi chỉ cho lớp bọc đơn giản.** `recover-metadata` chỉ gỡ được XOR (1–4 byte) hoặc qua `--cmd`; mã hoá mạnh hơn cần decryptor riêng của bạn. `unpack-native` chỉ *nhận diện* packer; muốn mở phải tự đưa `--cmd`. Riêng DLL hot-update HybridCLR thì `decrypt-hotdll` (bước 11) tự tìm key trong metadata; thuật toán/key ngoài metadata phải đưa qua `--keys`.
 
 ## Nguyên tắc an toàn của công cụ
 
@@ -290,10 +319,12 @@ Sau khi đưa repo lên GitHub:
 /plugin install unity-apk-re@unity-apk-re
 ```
 
-Ba skill sẽ có sẵn:
+Các skill có sẵn:
 
 | Skill                            | Dùng khi                                             |
 | -------------------------------- | ---------------------------------------------------- |
-| `/unity-apk-re:analyze-apk`      | Chạy cả quy trình và giải thích kết quả              |
+| `/unity-apk-re:rebuild-game`     | **Quy trình chính** -- từ APK đến Unity project, có checkpoint hỏi user |
+| `/unity-apk-re:analyze-apk`      | Chạy pipeline phân tích và giải thích kết quả         |
 | `/unity-apk-re:pull-from-device` | Lấy APK từ điện thoại, xử lý lỗi kết nối thiết bị    |
 | `/unity-apk-re:explore-il2cpp`   | Tìm tên class/method/chuỗi, giải thích `report.json` |
+| `/unity-apk-re:operate-and-test` | Chạy thử/kiểm tra không cần điện thoại               |

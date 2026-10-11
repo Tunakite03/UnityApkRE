@@ -1,7 +1,7 @@
 {
   "name": "unity-apk-re",
   "version": "0.7.0",
-  "description": "Static recon of Unity Android games: pull APK splits/OBBs over a bundled adb, merge them, and report on Unity data, IL2CPP metadata and native libraries.",
+  "description": "AI agent guidance plugin for reverse engineering and rebuilding Unity Android games. Guides the agent through an interactive workflow: pull APK, extract assets, analyze, report findings to user, then rebuild into an openable Unity project based on user decisions.",
   "author": {
     "name": "tunakite03"
   },

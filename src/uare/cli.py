@@ -1,6 +1,7 @@
 """Command line: uare {doctor,fetch-adb,devices,packages,pull,extract,analyze,run,summary,find,
 dump-il2cpp,il2cpp-enrich,decompile,fetch-tool,recover-metadata,unpack-native,export-assets,
-rebuild,mono-decompile,il2cpp-annotate,generate-meta,recover-shaders,convert-scenes,extract-wwise}."""
+rebuild,mono-decompile,il2cpp-annotate,generate-meta,recover-shaders,convert-scenes,extract-wwise,
+decrypt-hotdll}."""
 
 import argparse
 import importlib.util
@@ -29,6 +30,7 @@ from uare.il2cpp_tools import DEFAULT_VENDOR_ROOT as DUMPER_VENDOR_ROOT
 from uare.il2cpp_tools import enrich, resolve_dumper
 from uare.il2cpp_tools import summarize as summarize_enrich
 from uare.packers import identify_file
+from uare.hotdll import decrypt_directory, summarize as summarize_hotdll
 from uare.plan import Prerequisites, asset_modules, build_plan, workdir_state
 from uare.plan import summarize as summarize_plan
 from uare.tool_fetch import fetch_archive
@@ -383,6 +385,27 @@ def cmd_extract_wwise(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_decrypt_hotdll(args: argparse.Namespace) -> int:
+    magic = _bytes_arg(args.magic)
+    result = decrypt_directory(
+        Path(args.dll_dir), Path(args.out),
+        metadata=Path(args.metadata) if args.metadata else None,
+        algo=args.algo, key=_bytes_arg(args.key), iv=_bytes_arg(args.iv),
+        magic=magic if args.magic is not None else (b"" if args.no_magic else None),
+        keys_file=Path(args.keys) if args.keys else None)
+    print("\n".join(summarize_hotdll(result)))
+    return 0
+
+
+def _bytes_arg(value: str | None) -> bytes | None:
+    if value is None:
+        return None
+    try:
+        return bytes.fromhex(value)
+    except ValueError as exc:
+        raise UareError(f"hex argument invalid: {exc}") from exc
+
+
 def cmd_find(args: argparse.Namespace) -> int:
     search = search_literals if args.literals else search_identifiers
     hits = search(Path(args.analysis_dir), args.pattern, args.context, args.limit)
@@ -555,6 +578,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("source", help="directory containing .bnk files (searched recursively)")
     p.add_argument("--out", required=True, help="empty directory for extracted WEM files")
     p.set_defaults(func=cmd_extract_wwise)
+
+    p = sub.add_parser("decrypt-hotdll",
+                       help="decrypt HybridCLR-encrypted hot-update DLLs (keys recovered from "
+                            "global-metadata.dat, SHA-256 verified)")
+    p.add_argument("dll_dir", help="directory holding the encrypted *.dll files "
+                                    "(e.g. <workdir>/extracted-assets/scripts/hotdll)")
+    p.add_argument("--out", required=True, help="empty output directory for decrypted/ + keys.json")
+    p.add_argument("--metadata", help="global-metadata.dat (default: searched near dll_dir)")
+    p.add_argument("--keys", help="keys.json from a previous run (skips the key search)")
+    p.add_argument("--algo", choices=("aes-128-cbc", "aes-128-gcm", "chacha20", "rc4", "xor"),
+                   help="explicit scheme instead of the search")
+    p.add_argument("--key", help="hex key for explicit decryption")
+    p.add_argument("--iv", help="hex IV/nonce for explicit decryption")
+    p.add_argument("--magic", help="hex magic prefix stripped before the ciphertext")
+    p.add_argument("--no-magic", action="store_true", help="the ciphertext starts at byte 0")
+    p.set_defaults(func=cmd_decrypt_hotdll)
 
     p = sub.add_parser("find", help="regex search IL2CPP identifiers (or string literals) of an analysis")
     p.add_argument("analysis_dir")

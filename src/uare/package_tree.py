@@ -38,6 +38,14 @@ LOG = logging.getLogger("uare.package_tree")
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 _HASH_TAIL = re.compile(r"_[0-9a-f]{20,}$")
+_YOOASSET_PREFIXES = (
+    "share_assets_artassets_",
+    "share_assets_gameassets_",
+    "assets_gameassets_",
+    "assets_artassets_",
+    "assets_scripts_",
+    "assets_",
+)
 _SCENE = re.compile(r"^level\d+$")
 _MAX_STEM = 120
 _MAX_DEPTH = 64
@@ -113,21 +121,38 @@ def _sanitize(text: str, limit: int = _MAX_STEM) -> str:
 def _group_of(path: Path, is_bundle: bool) -> str:
     if not is_bundle:
         return "_serialized"
-    tokens = [t for t in _HASH_TAIL.sub("", path.stem).split("_") if t]
+    stem = _HASH_TAIL.sub("", path.stem)
+    tokens = [t for t in stem.split("_") if t]
     if tokens[:1] == ["gamepackage"]:
         tokens = tokens[1:]
-    return _sanitize("_".join(tokens[:4]), 60)
+    joined = "_".join(tokens)
+    for prefix in _YOOASSET_PREFIXES:
+        if joined.startswith(prefix):
+            joined = joined[len(prefix):]
+            break
+    parts = [_sanitize(p, 40) for p in joined.split("_") if p]
+    if not parts:
+        return "_misc"
+    return "/".join(parts[:4])
+
+
+def _trim_group(group: str, category: str) -> str:
+    """Strip a leading group segment when it duplicates the category name."""
+    head, sep, tail = group.partition("/")
+    if head == category and tail:
+        return tail
+    return group
 
 
 def _unique(base: str, path_id: int, used: set[str]) -> str:
-    """Return `base` unless taken; a collision gets the path id inserted before the extension."""
+    """Return `base` unless taken; collisions get a sequential counter before the extension."""
     ext = Path(base).suffix
     root = base[:-len(ext)] if ext else base
     candidate = base
-    suffix = path_id
+    counter = 1
     while candidate.casefold() in used:
-        candidate = f"{root}.{suffix}{ext}"
-        suffix += 1
+        candidate = f"{root}_{counter}{ext}"
+        counter += 1
     used.add(candidate.casefold())
     return candidate
 
@@ -451,8 +476,11 @@ class _Packager:
                     if category is None:
                         pending.append(obj)
                         continue
-                    directory = self._staging / "scripts" / "hotdll" if category == "scripts" \
-                        else self._staging / "assets" / category / group
+                    if category == "scripts":
+                        directory = self._staging / "scripts" / "hotdll"
+                    else:
+                        trimmed = _trim_group(group, category)
+                        directory = self._staging / "assets" / category / trimmed
                     stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
                                    self._used[str(directory)])
                     if cls == "TextAsset" and category == "audio":

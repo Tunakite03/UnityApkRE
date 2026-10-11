@@ -124,7 +124,15 @@ class BundleHelperTests(unittest.TestCase):
 
     def test_group_drops_prefix_and_content_hash(self) -> None:
         path = Path("gamepackage_assets_gameassets_sprite_pet_pet_1009_" + "a" * 32 + ".bundle")
-        self.assertEqual(pt._group_of(path, True), "assets_gameassets_sprite_pet")
+        self.assertEqual(pt._group_of(path, True), "sprite/pet/pet/1009")
+
+    def test_group_strips_artassets_prefix(self) -> None:
+        path = Path("gamepackage_assets_artassets_effect_prefabs_ui_arena_" + "b" * 32 + ".bundle")
+        self.assertEqual(pt._group_of(path, True), "effect/prefabs/ui/arena")
+
+    def test_group_strips_share_prefix(self) -> None:
+        path = Path("gamepackage_share_assets_artassets_effect_spine_" + "c" * 32 + ".bundle")
+        self.assertEqual(pt._group_of(path, True), "effect/spine")
 
     def test_serialized_files_share_one_group(self) -> None:
         self.assertEqual(pt._group_of(Path("level0"), False), "_serialized")
@@ -132,7 +140,7 @@ class BundleHelperTests(unittest.TestCase):
     def test_unique_keeps_source_extension(self) -> None:
         used: set[str] = set()
         self.assertEqual(pt._unique("arrow.atlas", 1, used), "arrow.atlas")
-        self.assertEqual(pt._unique("arrow.atlas", 7, used), "arrow.7.atlas")
+        self.assertEqual(pt._unique("arrow.atlas", 7, used), "arrow_1.atlas")
 
     def test_fsb_blobs_are_read_from_snd_chunk(self) -> None:
         blobs = pt._fsb_blobs(_fev_bank())
@@ -206,27 +214,27 @@ class PackageTests(unittest.TestCase):
 
     def test_outputs_are_grouped_by_source_bundle(self) -> None:
         _result, out = self._package()
-        self.assertTrue((out / "assets/textures/assets_gameassets_sprite_pet/icon.png").is_file())
-        self.assertTrue((out / "assets/meshes/assets_gameassets_sprite_pet/car.obj").is_file())
-        self.assertTrue((out / "assets/textassets/assets_gameassets_sprite_pet/config.txt").is_file())
+        self.assertTrue((out / "assets/textures/sprite/pet/pet/1009/icon.png").is_file())
+        self.assertTrue((out / "assets/meshes/sprite/pet/pet/1009/car.obj").is_file())
+        self.assertTrue((out / "assets/textassets/sprite/pet/pet/1009/config.txt").is_file())
 
     def test_duplicate_names_are_kept(self) -> None:
         _result, out = self._package()
-        icons = sorted(p.name for p in (out / "assets/textures/assets_gameassets_sprite_pet").glob("icon*.png"))
+        icons = sorted(p.name for p in (out / "assets/textures/sprite/pet/pet/1009").glob("icon*.png"))
         self.assertEqual(len(icons), 2)
 
     def test_prefab_json_nests_components(self) -> None:
         _result, out = self._package()
-        prefab = next((out / "assets/prefabs").glob("*/*.json"))
+        prefab = next((out / "assets/prefabs").glob("**/*.json"))
         roots = json.loads(prefab.read_text(encoding="utf-8"))["roots"]
         self.assertEqual(roots[0]["name"], "Root")
         self.assertEqual(roots[0]["children"][0]["name"], "Child")
 
     def test_fev_bank_is_copied_and_decoded(self) -> None:
         _result, out = self._package()
-        bank = out / "assets/audio/assets_gameassets_sprite_pet/Arrow.bank"
+        bank = out / "assets/audio/sprite/pet/pet/1009/Arrow.bank"
         self.assertTrue(bank.is_file())
-        self.assertTrue((out / "assets/audio/assets_gameassets_sprite_pet/Arrow/Arrow.wav").is_file())
+        self.assertTrue((out / "assets/audio/sprite/pet/pet/1009/Arrow/Arrow.wav").is_file())
 
     def test_uncategorised_objects_fall_back_to_typetree_json(self) -> None:
         _result, out = self._package()

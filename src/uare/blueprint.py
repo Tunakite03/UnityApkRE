@@ -131,9 +131,26 @@ def _structural_ids(root: str, by_id: dict[str, ObjectRecord],
     return visited
 
 
-def scene_reports(model: GameModel) -> list[dict[str, Json]]:
-    by_id = {o.id: o for o in model.objects}
-    edges = outgoing(model)
+@dataclass(frozen=True)
+class ScopeSpec:
+    """A scene, prefab or unclassified GameObject tree, before any report or export is built."""
+    kind: str
+    name: str
+    source: str
+    serialized_file: str
+    object_ids: frozenset[str]
+    root_id: str | None
+    build_index: int | None
+    evidence: str
+
+    @property
+    def scope_id(self) -> str:
+        seed = min(self.object_ids) if self.object_ids else identity(self.source, self.serialized_file, 0)
+        return seed + "-" + self.kind
+
+
+def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
+                    edges: dict[str, tuple[Reference, ...]]) -> list[ScopeSpec]:
     aliases = _bundle_assets(model, edges)
     scene_hashes: dict[tuple[str, str], set[str]] = defaultdict(set)
     for obj in model.objects:
@@ -151,7 +168,7 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
     build_orders = [o for o in model.objects if o.class_name == "BuildSettings" and
                     isinstance(o.data.get("m_Scenes"), list)]
     build_order = build_orders[0].data["m_Scenes"] if len(build_orders) == 1 else []
-    scopes: list[tuple[str, str, str, str, set[str], Json, str]] = []
+    specs: list[ScopeSpec] = []
     by_file: dict[tuple[str, str], set[str]] = defaultdict(set)
     for obj in model.objects:
         by_file[obj.source, obj.serialized_file].add(obj.id)
@@ -170,7 +187,8 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
                 item = build_order[index]
                 if isinstance(item, str):
                     name, evidence = item, "BuildSettings.m_Scenes + serialized_filename"
-            scopes.append(("scene", name, file.source, file.serialized_file, ids, index, evidence))
+            specs.append(ScopeSpec("scene", name, file.source, file.serialized_file, frozenset(ids), None,
+                                   index, evidence))
         elif any(by_id[oid].class_name == "GameObject" for oid in ids):
             prefab_roots = [oid for oid in ids if by_id[oid].class_name == "GameObject" and
                             any(a.endswith(".prefab") for a in aliases.get(oid, []))]
@@ -178,14 +196,23 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
             for oid in sorted(prefab_roots):
                 members = _structural_ids(oid, by_id, edges)
                 covered.update(members)
-                scopes.append(("prefab", next(a for a in aliases[oid] if a.endswith(".prefab")),
-                               file.source, file.serialized_file, members, None, "AssetBundle.m_Container"))
+                specs.append(ScopeSpec("prefab", next(a for a in aliases[oid] if a.endswith(".prefab")),
+                                       file.source, file.serialized_file, frozenset(members), oid, None,
+                                       "AssetBundle.m_Container"))
             remaining = ids - covered
             if any(by_id[oid].class_name == "GameObject" for oid in remaining):
-                scopes.append(("unclassified_hierarchy", file.serialized_file, file.source, file.serialized_file,
-                               remaining, None, "serialized_objects; prefab provenance unavailable"))
+                specs.append(ScopeSpec("unclassified_hierarchy", file.serialized_file, file.source,
+                                       file.serialized_file, frozenset(remaining), None, None,
+                                       "serialized_objects; prefab provenance unavailable"))
+    return specs
+
+
+def scene_reports(model: GameModel) -> list[dict[str, Json]]:
+    by_id = {o.id: o for o in model.objects}
+    edges = outgoing(model)
     reports: list[dict[str, Json]] = []
-    for kind, name, source, serialized, ids, index, evidence in scopes:
+    for spec in classify_scopes(model, by_id, edges):
+        ids = set(spec.object_ids)
         reachable = closure(ids, edges)
         direct = {r.target_id for oid in ids for r in edges.get(oid, ()) if r.target_id and r.target_id not in ids}
         unresolved = [asdict(r) for oid in sorted(reachable) for r in edges.get(oid, ())
@@ -203,9 +230,8 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
                 if field.endswith((".m_MethodName", ".functionName")) and value:
                     events.append({"object_id": oid, "field": field, "method": value,
                                    "evidence": "serialized_event", "execution": "not_observed"})
-        scope_id = (next(iter(sorted(ids))) if ids else identity(source, serialized, 0)) + "-" + kind
-        reports.append(record({"id": scope_id, "kind": kind, "name": name, "source": source,
-                               "build_index_candidate": index, "classification_evidence": evidence,
+        reports.append(record({"id": spec.scope_id, "kind": spec.kind, "name": spec.name, "source": spec.source,
+                               "build_index_candidate": spec.build_index, "classification_evidence": spec.evidence,
                                "object_ids": sorted(ids), "roots": roots,
                                "direct_assets": sorted(direct), "transitive_assets": sorted(reachable - ids - direct),
                                "animation_objects": sorted(oid for oid in reachable if by_id[oid].class_name in ANIMATION_CLASSES),
@@ -213,9 +239,8 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
                                "script_bindings": script_bindings, "events": events,
                                "unresolved_references": unresolved, "hierarchy_issues": issues,
                                "logic": {"status": "unknown", "reason": "Serialized events and fields do not establish method bodies or the core loop."},
-                               "dynamic_loading": "not_observed", "play_mode": "not_tested"}, scope_id))
+                               "dynamic_loading": "not_observed", "play_mode": "not_tested"}, spec.scope_id))
     return reports
-
 
 # These signatures identify presence, never a package version or runtime usage.
 _SIGNATURES: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
@@ -466,8 +491,8 @@ def write_blueprint(workdir: Path, out_dir: Path, model: GameModel) -> Blueprint
                            sum(r.status not in {"resolved", "null"} for r in model.references), str(out_dir))
 
 
-def blueprint(workdir: Path, out_dir: Path) -> BlueprintResult:
-    source = workdir / "extracted-assets" / "game_model.json"
+def blueprint(workdir: Path, out_dir: Path, assets_dir: Path) -> BlueprintResult:
+    source = assets_dir / "game_model.json"
     if not source.is_file():
         raise ModelError(f"Blueprint needs scoped object data; rerun `uare package` with this version; source={source}")
     return write_blueprint(workdir, out_dir, load_model(source))

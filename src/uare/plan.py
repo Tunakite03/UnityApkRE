@@ -62,7 +62,7 @@ def build_plan(package: str, workdir: Path, prerequisites: Prerequisites) -> Pla
         Step("analyze", f"scripts/uare analyze {wd}/extracted --out {wd}/analysis",
              f"{wd}/analysis/ (report.json, il2cpp/, files.jsonl)", needs_device=False, needs_unitypy=False),
         Step("package", f"scripts/uare package {wd}/extracted --out {wd}/extracted-assets",
-             f"{wd}/extracted-assets/ (media, game_model.json, catalog.json, raw hierarchies)",
+             f"{wd}/extracted-assets/ (shared/, scenes/, prefabs/, spines/, evidence/, game_model.json, catalog.json)",
              needs_device=False, needs_unitypy=True),
         Step("blueprint", f"scripts/uare blueprint {wd} --out {wd}/blueprint",
              f"{wd}/blueprint/ (scene manifests, asset usage, animations, SDK evidence, blockers)",

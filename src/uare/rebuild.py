@@ -177,7 +177,7 @@ def _copy_extracted_assets(assets_dir: Path, project: Path) -> dict[str, int]:
     """Copy categorized assets from ``uare package`` output into Unity project layout."""
     counts: dict[str, int] = {}
     for category, target_rel in _CATEGORY_DIRS.items():
-        src = assets_dir / "assets" / category
+        src = assets_dir / "shared" / category
         if src.is_dir():
             target = project / target_rel
             count = 0
@@ -189,7 +189,7 @@ def _copy_extracted_assets(assets_dir: Path, project: Path) -> dict[str, int]:
                 shutil.copy2(item, destination)
                 count += 1
             counts[category] = count
-    other_src = assets_dir / "assets"
+    other_src = assets_dir / "shared"
     if other_src.is_dir():
         known_categories = set(_CATEGORY_DIRS.keys())
         for sub in sorted(other_src.iterdir()):
@@ -335,7 +335,7 @@ def _run_wwise_extract(extracted_dir: Path, project: Path, warnings: list[str]) 
     return 0
 
 
-def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
+def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
     """Create a Unity project from a completed ``uare run`` work directory."""
     if not workdir.is_dir():
         raise UareError(f"{workdir} is not a directory")
@@ -345,7 +345,8 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
     backend = report.get("scripting_backend", "unknown")
 
     extracted_dir = workdir / "extracted"
-    assets_dir = workdir / "extracted-assets"
+    if (assets_dir / "assets").is_dir() and not (assets_dir / "shared").is_dir():
+        raise ModelError(f"Rebuild expects the shared/ layout; repackage with this version; source={assets_dir}")
     model_path = assets_dir / "game_model.json"
     if not model_path.is_file():
         raise ModelError("Rebuild requires a game model with scoped identities; rerun `uare package` using this version")
@@ -398,7 +399,7 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
             if not obj.output or obj.class_name not in {"Texture2D", "AudioClip"}:
                 continue
             parts = Path(obj.output).parts
-            if len(parts) < 3 or parts[0] != "assets" or parts[1] not in _CATEGORY_DIRS:
+            if len(parts) < 3 or parts[0] != "shared" or parts[1] not in _CATEGORY_DIRS:
                 continue
             asset_path = Path(_CATEGORY_DIRS[parts[1]]) / Path(*parts[2:])
             if (project / asset_path).is_file():

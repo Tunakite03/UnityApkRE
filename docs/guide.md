@@ -257,32 +257,35 @@ Directory structure of `extracted-assets/`:
 
 ```
 extracted-assets/
-  assets/
-    sprites/<group>/       Sprites (PNG)
-    textures/<group>/      Texture2D (PNG)
-    fonts/<group>/         Embedded TTF / OTF font files
-    audio/<group>/         AudioClip (WAV) + FMOD sound banks (.bank with sub-sounds in subdirectories)
-    animations/<group>/    AnimationClip (JSON)
-    animators/<group>/     AnimatorController (JSON)
-    spines/<group>/        Spine: *.atlas + *.skel + *_SkeletonData.json
-    meshes/<group>/        Mesh (OBJ)
-    materials/<group>/     Material (JSON)
-    shaders/<group>/       Shader (JSON)
-    textassets/<group>/    TextAsset (configs, CSV, JSON, Lua)
-    monobehaviours/<group>/MonoBehaviour component instances (JSON)
-    manifests/<group>/     AssetBundle, PreloadData, SpriteAtlas definitions
-    prefabs/<group>/       Prefab GameObject and Component trees (JSON)
-    objects/<class>/<group>/Other object classes in type-tree JSON
+  shared/<category>/<group>/     one canonical copy of every exported file: sprites, textures, fonts,
+                                 audio, animations, animators, spines, meshes, materials, shaders,
+                                 textassets, monobehaviours, videos, sprite_atlases
+  scenes/<SceneName>/            one folder per scene
+    scene.json                   GameObject hierarchy of the scene (scene name = its container path;
+                                 Data scenes keep their level name, for example level0)
+    manifest.json                assets the scene needs (static reference closure), references and gaps
+    <category>/<group>/...       hard links into shared/: the same bytes, no extra storage
+  prefabs/<group>/<PrefabName>/  one folder per prefab, holding only that prefab's root tree
+    prefab.json, manifest.json   and hard links as for scenes
+  spines/<group>/<SpineName>/    skeleton, atlas and page images (hard links), the SkeletonDataAsset
+                                 dump and manifest.json (pages linked, unresolved or ambiguous)
+  evidence/
+    bundles/<group>/             AssetBundle and PreloadData indexes (container lists)
+    unclassified/objects/        type-tree JSON for objects without a dedicated exporter
+    unclassified/hierarchies/    GameObject trees that are neither a scene nor a prefab
   scripts/
-    hotdll/                Hot-update assemblies (retained in raw form; see decrypt-hotdll below)
-    monoscripts.tsv        Asset-to-IL2CPP class binding map
-  scenes/<levelN>/hierarchy.json Scene GameObject hierarchy and component bindings
-  catalog.json             Complete object index: class, name, category, source, output path, or note
-  index.html               Self-contained offline browser with filtering and search
-  report.json              Object counts, extraction statistics, and per-file errors
+    hotdll/                      hot-update assemblies, still encrypted (see decrypt-hotdll below)
+    monoscripts.tsv              MonoScript table: class, namespace, assembly
+  catalog.json                   every object: class, name, category, source, output path, or note
+  index.html                     self-contained offline browser for catalog.json
+  report.json                    object counts, scene/prefab/spine folders, hard links, per-file errors
+  game_model.json                scoped identities, fields and resolved/missing references
 ```
 
-`<group>` is derived from bundle identifiers (e.g., YooAsset bundle names stripped of `gamepackage_` prefixes and hash tags, such as `assets_gameassets_sprite_pet/`). Objects originating from the same bundle reside in the same directory.
+Scene and prefab folders contain hard links, not copies: editing a file inside a scene folder edits the
+shared copy. `zip` and `rsync` without `-H` store each link as a separate copy.
+
+`<group>` is derived from bundle identifiers (e.g., YooAsset bundle names stripped of `gamepackage_` prefixes and hash tags, such as `assets_gameassets_sprite_pet/`). Objects from the same bundle reside in the same group directory under `shared/`.
 
 - **YooAsset bundle support**: Some builds prepend custom header bytes before the `UnityFS` magic identifier. `package` automatically detects and skips this prefix (`bundle_offset`) without needing decryption.
 - **Hot-update DLL detection**: Bundled assemblies (e.g., `GameHotfix_*.dll`) missing standard PE headers are preserved under `scripts/hotdll/` for subsequent decryption.

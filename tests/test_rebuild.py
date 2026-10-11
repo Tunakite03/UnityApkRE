@@ -22,13 +22,13 @@ def _setup_workdir(root: Path) -> None:
         "native_libraries": [],
     }))
     assets = root / "extracted-assets"
-    tex = assets / "assets" / "textures"
+    tex = assets / "shared" / "textures"
     tex.mkdir(parents=True)
     (tex / "hero.png").write_bytes(b"\x89PNG")
-    audio = assets / "assets" / "audio"
+    audio = assets / "shared" / "audio"
     audio.mkdir(parents=True)
     (audio / "bgm.wav").write_bytes(b"RIFF")
-    scripts = assets / "assets" / "scripts"
+    scripts = assets / "shared" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "Game.cs").write_text("class Game {}")
     save_model(assets / "game_model.json", GameModel((), (), (), ()))
@@ -75,7 +75,7 @@ class RebuildTests(unittest.TestCase):
             workdir.mkdir()
             _setup_workdir(workdir)
             out = Path(tmpdir) / "project"
-            result = rebuild(workdir, out)
+            result = rebuild(workdir, out, workdir / "extracted-assets")
             self.assertEqual(result.unity_version, "2022.3.10f1")
             self.assertEqual(result.scripting_backend, "il2cpp")
             self.assertTrue((out / "ProjectSettings" / "ProjectVersion.txt").is_file())
@@ -89,7 +89,7 @@ class RebuildTests(unittest.TestCase):
             workdir.mkdir()
             _setup_workdir(workdir)
             out = Path(tmpdir) / "project"
-            result = rebuild(workdir, out)
+            result = rebuild(workdir, out, workdir / "extracted-assets")
             self.assertGreater(result.textures, 0)
             self.assertGreater(result.audio, 0)
             self.assertTrue((out / "Assets" / "Textures" / "hero.png").is_file())
@@ -100,7 +100,7 @@ class RebuildTests(unittest.TestCase):
             workdir.mkdir()
             _setup_workdir(workdir)
             out = Path(tmpdir) / "project"
-            rebuild(workdir, out)
+            rebuild(workdir, out, workdir / "extracted-assets")
             report = json.loads((out / "rebuild_report.json").read_text())
             self.assertIn("unity_version", report)
             self.assertIn("steps", report)
@@ -111,7 +111,19 @@ class RebuildTests(unittest.TestCase):
             workdir.mkdir()
             from uare.errors import UareError
             with self.assertRaises(UareError):
-                rebuild(workdir, Path(tmpdir) / "out")
+                rebuild(workdir, Path(tmpdir) / "out", workdir / "extracted-assets")
+
+    def test_legacy_assets_layout_is_refused_with_a_repackage_instruction(self):
+        from uare.game_model import ModelError
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir) / "work"
+            _setup_workdir(workdir)
+            assets = workdir / "extracted-assets"
+            (assets / "shared").rename(assets / "assets")
+            out = Path(tmpdir) / "out"
+            with self.assertRaisesRegex(ModelError, "shared/ layout"):
+                rebuild(workdir, out, assets)
+            self.assertFalse(out.exists())
 
     def test_meta_generation_runs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,7 +131,7 @@ class RebuildTests(unittest.TestCase):
             workdir.mkdir()
             _setup_workdir(workdir)
             out = Path(tmpdir) / "project"
-            result = rebuild(workdir, out)
+            result = rebuild(workdir, out, workdir / "extracted-assets")
             self.assertIn("meta_generation", result.steps_run)
             meta_files = list((out / "Assets").rglob("*.meta"))
             self.assertGreater(len(meta_files), 0)

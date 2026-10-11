@@ -1,9 +1,12 @@
+import errno
 import json
+import os
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from uare import cli
 from uare import package_tree as pt
@@ -214,32 +217,32 @@ class PackageTests(unittest.TestCase):
 
     def test_outputs_are_grouped_by_source_bundle(self) -> None:
         _result, out = self._package()
-        self.assertTrue((out / "assets/textures/sprite/pet/pet/1009/icon.png").is_file())
-        self.assertTrue((out / "assets/meshes/sprite/pet/pet/1009/car.obj").is_file())
-        self.assertTrue((out / "assets/textassets/sprite/pet/pet/1009/config.txt").is_file())
+        self.assertTrue((out / "shared/textures/sprite/pet/pet/1009/icon.png").is_file())
+        self.assertTrue((out / "shared/meshes/sprite/pet/pet/1009/car.obj").is_file())
+        self.assertTrue((out / "shared/textassets/sprite/pet/pet/1009/config.txt").is_file())
 
     def test_duplicate_names_are_kept(self) -> None:
         _result, out = self._package()
-        icons = sorted(p.name for p in (out / "assets/textures/sprite/pet/pet/1009").glob("icon*.png"))
+        icons = sorted(p.name for p in (out / "shared/textures/sprite/pet/pet/1009").glob("icon*.png"))
         self.assertEqual(len(icons), 2)
 
     def test_unclassified_hierarchy_nests_components_without_claiming_prefab(self) -> None:
         _result, out = self._package()
-        self.assertFalse((out / "assets/prefabs").exists())
-        prefab = next((out / "hierarchies").glob("**/*.json"))
+        self.assertFalse((out / "prefabs").exists())
+        prefab = next((out / "evidence/unclassified/hierarchies").glob("**/*.json"))
         roots = json.loads(prefab.read_text(encoding="utf-8"))["roots"]
         self.assertEqual(roots[0]["name"], "Root")
         self.assertEqual(roots[0]["children"][0]["name"], "Child")
 
     def test_fev_bank_is_copied_and_decoded(self) -> None:
         _result, out = self._package()
-        bank = out / "assets/audio/sprite/pet/pet/1009/Arrow.bank"
+        bank = out / "shared/audio/sprite/pet/pet/1009/Arrow.bank"
         self.assertTrue(bank.is_file())
-        self.assertTrue((out / "assets/audio/sprite/pet/pet/1009/Arrow/Arrow.wav").is_file())
+        self.assertTrue((out / "shared/audio/sprite/pet/pet/1009/Arrow/Arrow.wav").is_file())
 
     def test_uncategorised_objects_fall_back_to_typetree_json(self) -> None:
         _result, out = self._package()
-        self.assertTrue(list((out / "assets/objects/Cubemap").glob("**/sky.json")))
+        self.assertTrue(list((out / "evidence/unclassified/objects/Cubemap").glob("**/sky.json")))
 
     def test_monoscript_table_and_spine_guess(self) -> None:
         result, out = self._package()
@@ -278,6 +281,207 @@ class PackageTests(unittest.TestCase):
         with self.assertRaises(pt.UnityPyRequired):
             cli.cmd_run(args)
         self.assertFalse(workdir.exists())
+
+
+ATLAS_TEXT = (
+    "hero.png\nsize: 4,4\nformat: RGBA8888\nfilter: Linear,Linear\nrepeat: none\n"
+    "body\n  rotate: false\n  xy: 0, 0\n  size: 4, 4\n  orig: 4, 4\n  offset: 0, 0\n  index: -1\n\n"
+    "hero mid.png\nsize: 4,4\nformat: RGBA8888\nfilter: Linear,Linear\nrepeat: none\n"
+    "mid\n  rotate: false\n  xy: 0, 0\n  size: 4, 4\n  orig: 4, 4\n  offset: 0, 0\n  index: -1\n\n"
+    "missing.png\nsize: 2,2\nformat: RGBA8888\nfilter: Linear,Linear\nrepeat: none\n"
+    "tail\n  rotate: false\n  xy: 0, 0\n  size: 2, 2\n  orig: 2, 2\n  offset: 0, 0\n  index: -1\n"
+)
+
+
+def _ptr(path_id: int) -> dict:
+    return {"m_FileID": 0, "m_PathID": path_id}
+
+
+def _in_file(serialized: str, objects: list) -> list:
+    """Assign fake objects to one serialized file, the way UnityPy groups objects by file."""
+    for obj in objects:
+        obj.assets_file = _Pay(name=serialized, externals=[])
+    return objects
+
+
+def _container(pairs: list[tuple[str, int]]) -> _Obj:
+    typetree = {"m_Container": [[path, {"asset": _ptr(target), "preloadIndex": 0, "preloadSize": 0}]
+                                for path, target in pairs]}
+    return _Obj("AssetBundle", 100, "bundle", _Pay(), typetree=typetree)
+
+
+def _gameobject(path_id: int, name: str, transform_id: int) -> _Obj:
+    payload = _Pay(m_Component=[_PPtr(transform_id)], m_Name=name)
+    typetree = {"m_Name": name, "m_Component": [{"component": _ptr(transform_id)}]}
+    return _Obj("GameObject", path_id, name, payload, typetree=typetree)
+
+
+def _transform(path_id: int, gameobject_id: int) -> _Obj:
+    payload = _Pay(m_GameObject=_PPtr(gameobject_id), m_Father=_PPtr(0))
+    return _Obj("Transform", path_id, "", payload,
+                typetree={"m_GameObject": _ptr(gameobject_id), "m_Father": _ptr(0), "m_Children": []})
+
+
+def _scene_objects(container_path: str) -> list:
+    holder = _Obj("MonoScript", 9, "Holder", _Pay(m_ClassName="Holder"),
+                  typetree={"m_ClassName": "Holder", "m_Namespace": "", "m_AssemblyName": "Game.dll"})
+    behaviour = _Obj("MonoBehaviour", 8, "", _Pay(m_Script=_PPtr(9, _Pay(m_ClassName="Holder"))),
+                     typetree={"m_Script": _ptr(9), "sprite": _ptr(6), "placeholder": _ptr(7)})
+    return [
+        _container([(container_path, 1)]),
+        _gameobject(1, "Root", 2), _transform(2, 1),
+        behaviour, holder,
+        _Obj("Texture2D", 6, "icon", _Pay(m_Width=4, m_Height=4, image=_Image())),
+        _Obj("Texture2D", 7, "placeholder", _Pay(m_Width=0, m_Height=0, image=None)),
+    ]
+
+
+def _empty_scene_objects(container_path: str) -> list:
+    return [_container([(container_path, 5)]),
+            _Obj("RenderSettings", 5, "", _Pay(), typetree={"m_Fog": False})]
+
+
+def _spine_objects() -> list:
+    script = _Obj("MonoScript", 30, "SkeletonDataAsset", _Pay(m_ClassName="SkeletonDataAsset"),
+                  typetree={"m_ClassName": "SkeletonDataAsset", "m_Namespace": "Spine.Unity", "m_AssemblyName": "spine-unity"})
+    atlas_script = _Obj("MonoScript", 36, "SpineAtlasAsset", _Pay(m_ClassName="SpineAtlasAsset"),
+                        typetree={"m_ClassName": "SpineAtlasAsset", "m_Namespace": "Spine.Unity", "m_AssemblyName": "spine-unity"})
+    anchor = _Obj("MonoBehaviour", 31, "hero_SkeletonData",
+                  _Pay(m_Script=_PPtr(30, _Pay(m_ClassName="SkeletonDataAsset"))),
+                  typetree={"m_Script": _ptr(30), "skeletonJSON": _ptr(32), "atlasAssets": [_ptr(33)]})
+    atlas_asset = _Obj("MonoBehaviour", 33, "",
+                       _Pay(m_Script=_PPtr(36, _Pay(m_ClassName="SpineAtlasAsset"))),
+                       typetree={"m_Script": _ptr(36), "atlasFile": _ptr(34)})
+    return [
+        script, atlas_script, anchor, atlas_asset,
+        _Obj("TextAsset", 32, "hero.skel", _Pay(m_Script=b"SKELETON")),
+        _Obj("TextAsset", 34, "hero.atlas", _Pay(m_Script=ATLAS_TEXT.encode("utf-8"))),
+        _Obj("Texture2D", 35, "hero", _Pay(m_Width=4, m_Height=4, image=_Image())),
+        _Obj("Texture2D", 37, "hero mid", _Pay(m_Width=4, m_Height=4, image=_Image())),
+    ]
+
+
+class LayoutTests(unittest.TestCase):
+    """Scene, prefab, spine and hard-link layout of the package output."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.data = self.tmp / "Data"
+        self.data.mkdir()
+        self._saved = {name: sys.modules.get(name) for name in ("UnityPy", "PIL", "fmod_toolkit")}
+        sys.modules.update(_fake_modules())
+        ENVS.clear()
+        ENVS[b"empty"] = []
+        (self.data / "globalgamemanagers").write_bytes(SERIALIZED_TAG + b"empty")
+
+    def tearDown(self) -> None:
+        for name, module in self._saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        self._tmp.cleanup()
+
+    def _bundle(self, label: str, objects: list) -> None:
+        ENVS[label.encode("utf-8")] = objects
+        name = f"gamepackage_assets_gameassets_{label}_" + "e" * 32 + ".bundle"
+        (self.data / name).write_bytes(b"UnityFS\x00" + label.encode("utf-8"))
+
+    def _package(self) -> tuple[pt.PackageResult, Path]:
+        out = self.tmp / "out"
+        return pt.package(self.data, out), out
+
+    def test_scenes_take_their_container_name_and_empty_scenes_keep_a_folder(self) -> None:
+        self._bundle("scenes", _in_file("CAB-map", _scene_objects("Assets/GameAssets/Scenes/Map_1001_2.unity"))
+                     + _in_file("CAB-empty", _empty_scene_objects("Assets/GameAssets/Scenes/Empty.unity")))
+        self._bundle("otherscenes", _in_file("CAB-other", _scene_objects("Assets/Other/Map_1001_2.unity")))
+        result, out = self._package()
+        self.assertEqual(sorted(p.name for p in (out / "scenes").iterdir()), ["Empty", "Map_1001_2", "Map_1001_2_1"])
+        for name in ("Map_1001_2", "Map_1001_2_1"):
+            scene = json.loads((out / "scenes" / name / "scene.json").read_text(encoding="utf-8"))
+            self.assertEqual(scene["roots"][0]["name"], "Root")
+        empty = json.loads((out / "scenes/Empty/scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(empty["roots"], [])
+        self.assertEqual(result.prefabs, 0)
+
+    def test_prefab_roots_are_split_and_unclaimed_roots_stay_in_evidence(self) -> None:
+        objects = [
+            _container([("Assets/ArtAssets/fx/A.prefab", 1), ("Assets/ArtAssets/fx/B.prefab", 10)]),
+            _gameobject(1, "A", 2), _transform(2, 1),
+            _gameobject(10, "B", 11), _transform(11, 10),
+            _gameobject(20, "Loose", 21), _transform(21, 20),
+        ]
+        self._bundle("artassets_fx", _in_file("CAB-fx", objects))
+        result, out = self._package()
+        prefab_a = json.loads(next(out.glob("prefabs/**/A/prefab.json")).read_text(encoding="utf-8"))
+        prefab_b = json.loads(next(out.glob("prefabs/**/B/prefab.json")).read_text(encoding="utf-8"))
+        self.assertEqual([r["name"] for r in prefab_a["roots"]], ["A"])
+        self.assertEqual([r["name"] for r in prefab_b["roots"]], ["B"])
+        loose = json.loads(next(out.glob("evidence/unclassified/hierarchies/**/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual([r["name"] for r in loose["roots"]], ["Loose"])
+        catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
+        outputs = {e["name"]: e["output"] for e in catalog if e["class_name"] == "GameObject"}
+        self.assertTrue(outputs["A"].endswith("/A/prefab.json"), outputs["A"])
+        self.assertTrue(outputs["Loose"].startswith("evidence/unclassified/hierarchies/"), outputs["Loose"])
+        self.assertEqual(result.prefabs, 2)
+
+    def test_scene_folder_hard_links_its_shared_assets_and_manifest_lists_unexported_ones(self) -> None:
+        self._bundle("scenes", _in_file("CAB-map", _scene_objects("Assets/GameAssets/Scenes/Map_1001_2.unity")))
+        result, out = self._package()
+        folder = out / "scenes/Map_1001_2"
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        icon = next(a for a in manifest["assets"] if a["path"].endswith("icon.png"))
+        self.assertTrue(icon["shared"].startswith("shared/textures/"), icon)
+        linked = folder / icon["path"]
+        self.assertTrue(os.path.samefile(linked, out / icon["shared"]))
+        self.assertGreaterEqual(linked.stat().st_nlink, 2)
+        self.assertTrue(any("placeholder" in row["note"] for row in manifest["without_output"]),
+                        manifest["without_output"])
+        self.assertGreaterEqual(result.links, 1)
+        self.assertGreaterEqual(result.most_links_per_file, 1)
+
+    def test_spine_folder_links_skeleton_atlas_pages_and_dump_and_reports_missing_pages(self) -> None:
+        self._bundle("spine", _in_file("CAB-spine", _spine_objects()))
+        result, out = self._package()
+        folder = next(out.glob("spines/**/hero_SkeletonData"))
+        self.assertTrue((folder / "hero.skel").is_file())
+        self.assertTrue((folder / "hero.atlas").is_file())
+        self.assertTrue((folder / "hero.png").is_file())
+        self.assertTrue((folder / "hero_SkeletonData.json").is_file())
+        self.assertFalse((folder / "missing.png").exists())
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        status = {row["name"]: row["status"] for row in manifest["pages"]}
+        self.assertEqual(status, {"hero.png": "linked", "hero mid.png": "linked", "missing.png": "unresolved"})
+        self.assertTrue((folder / "hero mid.png").is_file())
+        self.assertTrue(os.path.samefile(folder / "hero.png", out / manifest["pages"][0]["shared"]))
+        self.assertEqual(result.spines, 1)
+
+    def test_link_failure_is_loud_and_leaves_no_output(self) -> None:
+        self._bundle("scenes", _in_file("CAB-map", _scene_objects("Assets/GameAssets/Scenes/Map_1001_2.unity")))
+        real_link = os.link
+
+        def failing(source, target, *args, **kwargs):
+            if "scenes" in str(target):
+                raise OSError(errno.EMLINK, "too many links")
+            return real_link(source, target, *args, **kwargs)
+
+        out = self.tmp / "out"
+        with mock.patch("uare.package_tree.os.link", side_effect=failing):
+            with self.assertRaises(pt.PackageLinkError):
+                pt.package(self.data, out)
+        self.assertFalse(out.exists())
+
+    def test_preflight_refuses_a_volume_without_hard_links_before_any_export(self) -> None:
+        self._bundle("scenes", _in_file("CAB-map", _scene_objects("Assets/GameAssets/Scenes/Map_1001_2.unity")))
+        out = self.tmp / "out"
+        with mock.patch("uare.package_tree.os.link", side_effect=PermissionError(errno.EPERM, "not permitted")):
+            with self.assertRaises(pt.PackageLinkError):
+                pt.package(self.data, out)
+        self.assertFalse(out.exists())
+
+    def test_atlas_pages_are_the_name_lines_of_page_blocks_only(self) -> None:
+        self.assertEqual(pt._atlas_pages(ATLAS_TEXT), ["hero.png", "hero mid.png", "missing.png"])
 
 
 if __name__ == "__main__":

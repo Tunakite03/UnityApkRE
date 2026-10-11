@@ -182,11 +182,10 @@ def recover_shaders(source_dir: Path, out_dir: Path) -> ShaderResult:
     """Scan for shader JSON files and recover ShaderLab source."""
     if not source_dir.is_dir():
         raise UareError(f"{source_dir} is not a directory")
-    shader_jsons: list[Path] = []
-    for candidate_dir in (source_dir / "assets" / "shaders", source_dir / "shaders", source_dir):
-        if candidate_dir.is_dir():
-            shader_jsons.extend(sorted(candidate_dir.rglob("*.json")))
-    shader_jsons = list(dict.fromkeys(shader_jsons))
+    # The first folder that exists is the only search root (never a union with the whole package tree).
+    search_root = next(d for d in (source_dir / "shared" / "shaders", source_dir / "shaders", source_dir)
+                       if d.is_dir())
+    shader_jsons = sorted(search_root.rglob("*.json"))
 
     results: list[ShaderInfo] = []
     recovered_orig = recovered_parsed = failed = 0

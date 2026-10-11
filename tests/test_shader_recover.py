@@ -95,6 +95,21 @@ class RecoverShadersTests(unittest.TestCase):
             result = recover_shaders(source, out)
             self.assertEqual(result.shaders_found, 0)
 
+    def test_shared_shaders_are_the_only_search_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package = Path(tmpdir) / "extracted-assets"
+            shader_data = {
+                "m_Script": "Shader \"Shared/Only\" { SubShader { Pass {} } }",
+                "m_ParsedForm": {"m_Name": "Shared/Only", "m_SubShaders": []}
+            }
+            (package / "shared" / "shaders").mkdir(parents=True)
+            (package / "shared" / "shaders" / "only.json").write_text(json.dumps(shader_data))
+            (package / "scenes" / "Login").mkdir(parents=True)
+            (package / "scenes" / "Login" / "scene.json").write_text(json.dumps({"roots": []}))
+            out = Path(tmpdir) / "out"
+            result = recover_shaders(package, out)
+            self.assertEqual(result.shaders_found, 1)
+
     def test_report_written(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "source" / "shaders"

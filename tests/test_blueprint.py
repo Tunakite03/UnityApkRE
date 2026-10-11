@@ -101,7 +101,7 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             save_model(root / "extracted-assets" / "game_model.json", model)
-            blueprint(root, root / "blueprint")
+            blueprint(root, root / "blueprint", root / "extracted-assets")
             recovered = load_model(root / "blueprint" / "game_model.json")
             self.assertEqual(recovered.objects[0].data["m_Script"], payload)
             page = (root / "blueprint" / "index.html").read_text(encoding="utf-8")
@@ -169,7 +169,7 @@ class BlueprintTests(unittest.TestCase):
                 "m_ClassName": "</script><script>alert(1)</script>", "m_Namespace": "Firebase.Auth", "m_AssemblyName": "Firebase.Auth.dll"})
             model = resolve(model.files, model.objects + (extra,), ())
             save_model(work / "extracted-assets" / "game_model.json", model)
-            result = blueprint(work, work / "blueprint")
+            result = blueprint(work, work / "blueprint", work / "extracted-assets")
             self.assertEqual(result.scenes, 1)
             report = json.loads((work / "blueprint" / "report.json").read_text())
             self.assertEqual(report["dependencies"][0]["name"], "Firebase")
@@ -281,10 +281,10 @@ class ProjectExportTests(unittest.TestCase):
             (work / "analysis" / "report.json").write_text(json.dumps({"scripting_backend": "il2cpp",
                 "inventory": {"unity_versions": {"2022.3.10f1": 1}}}))
             with self.assertRaises(ModelError):
-                rebuild(work, Path(tmp) / "legacy")
+                rebuild(work, Path(tmp) / "legacy", work / "extracted-assets")
             save_model(work / "extracted-assets" / "game_model.json", fixture_model())
             out = Path(tmp) / "project"
-            rebuild(work, out)
+            rebuild(work, out, work / "extracted-assets")
             self.assertEqual(json.loads((out / "Packages" / "manifest.json").read_text()), {"dependencies": {}})
             report = json.loads((out / "rebuild_report.json").read_text())
             self.assertEqual(report["status"], "structural_draft")
@@ -301,7 +301,7 @@ class ProjectExportTests(unittest.TestCase):
             (work / "rebuild-packages.json").write_text(json.dumps({"dependencies": {"com.unity.addressables": "latest"}}))
             out = Path(tmp) / "project"
             with self.assertRaises(ModelError):
-                rebuild(work, out)
+                rebuild(work, out, work / "extracted-assets")
             self.assertFalse(out.exists())
 
 

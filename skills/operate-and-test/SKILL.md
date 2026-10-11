@@ -60,6 +60,7 @@ These checks read files that already exist. They do not run the pipeline.
 - `extracted-assets/catalog.json`: every entry needs an `output` or a `note`. An entry with neither is a bug.
 - Each `output` path in the catalog exists on disk. No two objects share one output (components and monoscripts are the only shared outputs, by design).
 - `categories` in `report.json` counts the files written. `in_hierarchy` counts the components stored inside prefab and scene JSON.
+- Each scene, prefab and spine folder has a `manifest.json`. Every `assets[].path` in it exists and is a hard link of its `shared` file: same inode, link count of at least 2.
 
 A small check that does all of these:
 

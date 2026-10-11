@@ -250,26 +250,35 @@ scripts/uare package <workdir>/extracted --out <workdir>/extracted-assets
 
 ```
 extracted-assets/
-  assets/
-    sprites/<nhóm>/       sprite (PNG)              textures/<nhóm>/  Texture2D (PNG)
-    fonts/<nhóm>/         TTF/OTF nhúng sẵn        audio/<nhóm>/     AudioClip (WAV) + FMOD bank (.bank, subsound WAV trong thư mục con)
-    animations/<nhóm>/    AnimationClip (JSON)     animators/<nhóm>/ AnimatorController (JSON)
-    spines/<nhóm>/        Spine: *.atlas + *.skel + *_SkeletonData.json
-    meshes/<nhóm>/        Mesh (OBJ)               materials/<nhóm>/ Material (JSON)
-    shaders/<nhóm>/       Shader (JSON)            textassets/<nhóm>/ TextAsset (config/JSON/CSV)
-    monobehaviours/<nhóm>/ MonoBehaviour (JSON)    manifests/<nhóm>/ AssetBundle, PreloadData, SpriteAtlas
-    prefabs/<nhóm>/       cây GameObject + component của mỗi bundle prefab (JSON)
-    objects/<class>/<nhóm>/  các class khác, dạng type-tree JSON
+  shared/<category>/<nhóm>/     mỗi file xuất ra đúng MỘT bản: sprites, textures, fonts, audio, animations,
+                                animators, spines, meshes, materials, shaders, textassets, monobehaviours,
+                                videos, sprite_atlases
+  scenes/<TênScene>/            một thư mục cho mỗi scene
+    scene.json                  cây GameObject của scene (tên scene lấy từ đường dẫn container;
+                                scene trong Data giữ tên level, ví dụ level0)
+    manifest.json               asset scene cần (đóng tham chiếu tĩnh), tham chiếu và phần còn thiếu
+    <category>/<nhóm>/...       hard link vào shared/: cùng dữ liệu, không tốn thêm dung lượng
+  prefabs/<nhóm>/<TênPrefab>/   một thư mục cho mỗi prefab, chỉ chứa cây gốc của prefab đó
+    prefab.json, manifest.json  và hard link như scene
+  spines/<nhóm>/<TênSpine>/     skeleton, atlas và ảnh page (hard link), dump SkeletonDataAsset,
+                                manifest.json (page đã nối, chưa nối được hoặc mơ hồ)
+  evidence/
+    bundles/<nhóm>/             chỉ mục AssetBundle và PreloadData (danh sách container)
+    unclassified/objects/       type-tree JSON của object không có exporter riêng
+    unclassified/hierarchies/   cây GameObject không phải scene và cũng không phải prefab
   scripts/
-    hotdll/               assembly hot-update (vẫn ở dạng mã hóa, xem bên dưới)
-    monoscripts.tsv       ánh xạ asset -> class IL2CPP
-  scenes/<levelN>/hierarchy.json   cây GameObject của scene
-  catalog.json            mọi object: class, name, category, source, output hoặc note (lý do)
-  index.html              xem/lọc được (lọc theo class/name/source/category)
-  report.json             số lượng + lỗi theo file
+    hotdll/                     assembly hot-update, vẫn ở dạng mã hóa (xem decrypt-hotdll bên dưới)
+    monoscripts.tsv             bảng MonoScript: class, namespace, assembly
+  catalog.json                  mọi object: class, name, category, source, output hoặc note (lý do)
+  index.html                    xem/lọc offline cho catalog.json
+  report.json                   số lượng object, số thư mục scene/prefab/spine, số hard link, lỗi theo file
+  game_model.json               định danh có phạm vi, field, tham chiếu đã resolve/thiếu
 ```
 
-`<nhóm>` lấy từ tên bundle YooAsset (bốn token đầu, bỏ tiền tố `gamepackage_` và mã hash), ví dụ `assets_gameassets_sprite_pet/`. Các object cùng bundle nằm cùng thư mục.
+Thư mục scene và prefab chứa hard link, không phải bản sao: sửa một file trong thư mục scene là sửa luôn
+bản trong `shared/`. `zip` và `rsync` không có `-H` sẽ ghi mỗi link thành một bản sao riêng.
+
+`<nhóm>` lấy từ tên bundle YooAsset (bốn token đầu, bỏ tiền tố `gamepackage_` và mã hash), ví dụ `assets_gameassets_sprite_pet/`. Các object cùng bundle nằm cùng thư mục nhóm trong `shared/`.
 
 - **Mở được cả bundle YooAsset**: một số build chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì**.
 - **Hot-update DLL**: `GameHotfix_*.dll` trong bundle thường ở dạng mã hóa (không có header PE). `package` giữ nguyên; để giải mã, chạy `decrypt-hotdll` ở bước 11 bên dưới.

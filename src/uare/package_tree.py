@@ -1,15 +1,20 @@
-"""Full asset export of a Unity build, grouped by category and by source bundle.
+"""Full asset export of a Unity build: one canonical copy per object, and scene, prefab and spine folders
+that hard-link into it.
 
-    assets/<category>/<group>/            exported objects: sprites, textures, fonts, audio, meshes, ...
-    assets/objects/<class>/<group>/       type-tree JSON for objects that have no dedicated exporter
-    hierarchies/<group>/<file>.json      unclassified GameObject trees; not assumed to be prefabs
-    scenes/<level>/hierarchy.json         scene hierarchies
+    shared/<category>/<group>/            canonical copy of every exported object: sprites, textures, fonts,
+                                          audio, meshes, materials, shaders, textassets, monobehaviours, ...
+    shared/sprite_atlases/<group>/        SpriteAtlas definitions
+    evidence/bundles/<group>/             AssetBundle and PreloadData indexes (container lists)
+    evidence/unclassified/objects/        type-tree JSON for objects that have no dedicated exporter
+    evidence/unclassified/hierarchies/    GameObject trees that are neither a scene nor a prefab
+    scenes/<SceneName>/                   scene.json (hierarchy), manifest.json and hard links into shared/
+    prefabs/<group>/<PrefabName>/         prefab.json (that prefab's root tree), manifest.json, hard links
+    spines/<group>/<SpineName>/           atlas, skeleton and page images (hard links), SkeletonDataAsset dump
     scripts/monoscripts.tsv               MonoScript table: class, namespace, assembly
     scripts/hotdll/                       assemblies stored as TextAsset
-    catalog.json                          one entry per object read: its output, or why it has none
-    index.html                            filterable view of catalog.json
-    report.json                           counts and per-file open errors
-    game_model.json                       scoped identities, fields and resolved/missing references
+    catalog.json, index.html, report.json, game_model.json
+
+Scene, prefab and spine folders hold hard links, not copies: each link is the same inode as its shared file.
 
 The group of an object is taken from its source bundle name: YooAsset names encode the asset path,
 so the first four tokens (after `gamepackage_`, without the content hash) keep related assets
@@ -22,17 +27,20 @@ Nothing is decrypted. A bundle whose UnityFS magic sits behind a zero prefix is 
 import importlib
 import json
 import logging
+import os
 import re
 import shutil
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from uare.analyze import Layout, resolve_layout
+from uare.blueprint import ScopeSpec, classify_scopes
 from uare.errors import UareError
 from uare.logs import event
-from uare.game_model import FileRecord, ObjectRecord, identity, resolve, save_model
+from uare.game_model import (FileRecord, ObjectRecord, Reference, closure, identity, outgoing, resolve,
+                             save_model)
 from uare.model_capture import UnityObject, capture, group_objects, serialized_name
 from uare.outdir import staged_output
 from uare.unity import _SIGNATURE_SCAN, bundle_offset
@@ -49,7 +57,7 @@ _YOOASSET_PREFIXES = (
     "assets_scripts_",
     "assets_",
 )
-_SCENE = re.compile(r"^level\d+$")
+_TREE_OUTPUT_PREFIX = ".trees/"
 _MAX_STEM = 120
 _MAX_DEPTH = 64
 _SPINE_TEXT_SUFFIXES = (".atlas", ".skel", ".skel.bytes")
@@ -58,16 +66,16 @@ _FAILURES = (EOFError, ValueError, OSError, KeyError, TypeError, AttributeError,
              NotImplementedError, RuntimeError, IndexError)
 _HIERARCHY_CLASSES = frozenset({"GameObject", "Transform", "RectTransform"})
 
-# UnityPy class name -> output folder under assets/. Classes not listed here get a type-tree JSON
-# under assets/objects/ unless they are attached to a GameObject, in which case they are stored in
-# the prefab or scene JSON.
+# UnityPy class name -> output folder under shared/. Classes not listed here get a type-tree JSON
+# under evidence/unclassified/objects/ unless they are attached to a GameObject, in which case they are
+# stored in the prefab or scene JSON. Bundle indexes are evidence and go to evidence/bundles/.
 _CATEGORY = {
     "Sprite": "sprites", "Texture2D": "textures", "Font": "fonts", "AudioClip": "audio",
     "VideoClip": "videos", "AnimationClip": "animations", "Animation": "animations",
     "AnimatorController": "animators", "AnimatorOverrideController": "animators",
     "Mesh": "meshes", "Material": "materials", "Shader": "shaders", "TextAsset": "textassets",
-    "MonoBehaviour": "monobehaviours", "AssetBundle": "manifests", "PreloadData": "manifests",
-    "SpriteAtlas": "manifests", "AssetBundleManifest": "manifests",
+    "MonoBehaviour": "monobehaviours", "AssetBundle": "bundles", "PreloadData": "bundles",
+    "SpriteAtlas": "sprite_atlases", "AssetBundleManifest": "bundles",
 }
 _TYPETREE_CLASSES = frozenset({
     "Material", "Shader", "AnimationClip", "Animation", "AnimatorController",
@@ -106,6 +114,19 @@ class PackageResult:
     hotdll: int
     scenes: tuple[str, ...]
     errors: int
+    prefabs: int
+    spines: int
+    links: int
+    most_links_per_file: int
+    issues: tuple[str, ...]
+
+
+class PackageLinkError(UareError):
+    """Scene and prefab folders are hard links into shared/; the output volume must support them."""
+
+
+class PackageLayoutError(UareError):
+    """An exported object could not be placed in a scene, prefab or evidence file."""
 
 
 def require_unitypy() -> None:
@@ -412,6 +433,74 @@ def _candidates(layout: Layout) -> list[Path]:
     return sorted(found)
 
 
+def _node_pids(node: dict[str, Any]) -> list[int]:
+    """Path ids of every GameObject, Transform and component in one GameObject subtree."""
+    pids: list[int] = []
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        for key in ("gameobject", "transform"):
+            if isinstance(current.get(key), int):
+                pids.append(current[key])
+        pids.extend(component["path_id"] for component in current.get("components", []))
+        pending.extend(current.get("children", []))
+    return pids
+
+
+def _placed(rel: str, serialized: str, roots: list[dict[str, Any]], target: str) -> dict[str, str]:
+    """Object id -> final JSON path for every object stored in these roots."""
+    return {identity(rel, serialized, pid): target for node in roots for pid in _node_pids(node)}
+
+
+def _scope_payload(spec: ScopeSpec, roots: list[dict[str, Any]]) -> bytes:
+    return _json_bytes({"scope_id": spec.scope_id, "kind": spec.kind, "name": spec.name,
+                        "source": spec.source, "serialized_file": spec.serialized_file, "roots": roots})
+
+
+def _ref(edges: dict[str, tuple[Reference, ...]], oid: str, field: str) -> str | None:
+    return next((r.target_id for r in edges.get(oid, ()) if r.field == field), None)
+
+
+def _atlas_pages(text: str) -> list[str]:
+    """Page image names of a Spine atlas: every page block is a name line followed by a `size:` line."""
+    pages: list[str] = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) >= 2 and lines[1].startswith("size:"):
+            pages.append(lines[0])
+    return pages
+
+
+def _link(source: Path, target: Path) -> None:
+    """Hard-link one canonical file. Never copies and never overwrites: any failure is loud."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, target)
+    except OSError as exc:
+        raise PackageLinkError(f"hard link failed ({exc.strerror}); source={source}, target={target}") from exc
+
+
+def _require_hard_links(staging: Path) -> None:
+    """Fail before any export when the output volume cannot create hard links."""
+    source, target = staging / ".link-probe-a", staging / ".link-probe-b"
+    try:
+        source.write_bytes(b"")
+        os.link(source, target)
+    except OSError as exc:
+        raise PackageLinkError(f"scene and prefab folders need hard links; the output volume refused ({exc}); "
+                               f"output={staging}") from exc
+    finally:
+        source.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+
+
+def _link_limit(staging: Path) -> int:
+    try:
+        return os.pathconf(staging, "PC_LINK_MAX")
+    except (OSError, ValueError) as exc:
+        raise PackageLinkError(f"cannot read the hard-link limit of the output volume ({exc}); output={staging}") from exc
+
+
 class _Packager:
     """Writes one output tree. Holds the staging directory, the catalog and the name registry."""
 
@@ -423,7 +512,11 @@ class _Packager:
         self._used: dict[str, set[str]] = defaultdict(set)
         self._counts: Counter[str] = Counter()
         self._catalog: list[CatalogEntry] = []
-        self._scenes: list[str] = []
+        self._groups: dict[str, str] = {}
+        self._trees: dict[tuple[str, str], Path] = {}
+        self._tree_seq = 0
+        self._layout_issues: list[str] = []
+        self._spines = 0
         self._files = 0
         self._objects = 0
         self._errors = 0
@@ -443,26 +536,222 @@ class _Packager:
 
     def finish(self, root: Path) -> PackageResult:
         write = self._staging
-        save_model(write / "game_model.json", resolve(tuple(self._model_files),
-                   tuple(self._model_objects), tuple(self._model_issues)))
+        model = resolve(tuple(self._model_files), tuple(self._model_objects), tuple(self._model_issues))
+        by_id = {o.id: o for o in model.objects}
+        edges = outgoing(model)
+        specs = classify_scopes(model, by_id, edges)
+        folders = self._scope_folders(specs)
+        placements = self._place_hierarchies(specs, folders, by_id)
+        self._resolve_component_outputs(placements)
+        links, most_links = self._link_scopes(specs, folders, edges)
+        self._write_spines(by_id, edges)
+        save_model(write / "game_model.json", model)
         (write / "catalog.json").write_text(json.dumps([asdict(e) for e in self._catalog], ensure_ascii=False),
                                             encoding="utf-8")
         (write / "index.html").write_text(_INDEX_HTML, encoding="utf-8")
         categories = {k: v for k, v in self._counts.most_common() if not k.startswith("_")}
-        result = PackageResult(root=str(root), files=self._files, objects=self._objects,
-                               exported=self._exported, in_hierarchy=self._in_hierarchy,
-                               skipped=self._counts["_skipped"], categories=categories,
-                               hotdll=self._hotdll, scenes=tuple(sorted(self._scenes)), errors=self._errors)
+        result = PackageResult(
+            root=str(root), files=self._files, objects=self._objects, exported=self._exported,
+            in_hierarchy=self._in_hierarchy, skipped=self._counts["_skipped"], categories=categories,
+            hotdll=self._hotdll,
+            scenes=tuple(sorted(folders[s.scope_id].rsplit("/", 1)[-1] for s in specs if s.kind == "scene")),
+            errors=self._errors, prefabs=sum(1 for s in specs if s.kind == "prefab"), spines=self._spines,
+            links=links, most_links_per_file=most_links, issues=tuple(self._layout_issues))
         (write / "report.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False),
                                            encoding="utf-8")
         shutil.rmtree(self._staging / ".scratch", ignore_errors=True)
+        shutil.rmtree(self._staging / ".trees", ignore_errors=True)
         return result
+
+    def _write_json(self, relative: str, payload: bytes) -> None:
+        _write(self._staging / relative, payload)
+
+    def _scope_folders(self, specs: list[ScopeSpec]) -> dict[str, str]:
+        """Folder of every scene (scenes/<name>) and prefab (prefabs/<group>/<name>), unique within its parent."""
+        folders: dict[str, str] = {}
+        for spec in sorted(specs, key=lambda s: s.scope_id):
+            if spec.kind == "scene":
+                stem = Path(spec.name).stem if spec.name.endswith(".unity") else spec.name
+                parent = "scenes"
+            elif spec.kind == "prefab":
+                stem = Path(spec.name).stem
+                parent = "prefabs/" + self._groups.get(spec.source, "_serialized")
+            else:
+                continue
+            name = _unique(_sanitize(stem), 0, self._used[parent])
+            folders[spec.scope_id] = f"{parent}/{name}"
+        return folders
+
+    def _place_hierarchies(self, specs: list[ScopeSpec], folders: dict[str, str],
+                           by_id: dict[str, ObjectRecord]) -> dict[str, str]:
+        """Write scene, prefab and unclaimed hierarchy JSON. Returns object id -> final JSON path."""
+        scenes = {(s.source, s.serialized_file): s for s in specs if s.kind == "scene"}
+        prefabs: dict[tuple[str, str], list[ScopeSpec]] = defaultdict(list)
+        for spec in specs:
+            if spec.kind == "prefab":
+                prefabs[spec.source, spec.serialized_file].append(spec)
+        placements: dict[str, str] = {}
+        written: set[str] = set()
+        for (rel, serialized), staged in sorted(self._trees.items()):
+            roots: list[dict[str, Any]] = json.loads(staged.read_bytes())["roots"]
+            scene = scenes.get((rel, serialized))
+            if scene is not None:
+                target = folders[scene.scope_id] + "/scene.json"
+                self._write_json(target, _scope_payload(scene, roots))
+                placements.update(_placed(rel, serialized, roots, target))
+                written.add(scene.scope_id)
+                continue
+            claimed: set[int] = set()
+            for spec in prefabs.get((rel, serialized), []):
+                pid = by_id[spec.root_id].path_id
+                index = next((i for i, node in enumerate(roots)
+                              if i not in claimed and node.get("gameobject") == pid), None)
+                if index is None:
+                    self._layout_issues.append(f"prefab root not found in its hierarchy; scope={spec.scope_id}")
+                    continue
+                claimed.add(index)
+                target = folders[spec.scope_id] + "/prefab.json"
+                self._write_json(target, _scope_payload(spec, [roots[index]]))
+                placements.update(_placed(rel, serialized, [roots[index]], target))
+                written.add(spec.scope_id)
+            leftover = [node for i, node in enumerate(roots) if i not in claimed]
+            if leftover:
+                group = self._groups.get(rel, "_serialized")
+                name = _unique(_sanitize(Path(serialized).stem) + ".json", 0, self._used["unclaimed/" + group])
+                target = f"evidence/unclassified/hierarchies/{group}/{name}"
+                self._write_json(target, _json_bytes({"source": rel, "serialized_file": serialized,
+                                                      "roots": leftover}))
+                placements.update(_placed(rel, serialized, leftover, target))
+        for spec in specs:
+            if spec.kind in ("scene", "prefab") and spec.scope_id not in written:
+                # Scenes without GameObjects (e.g. Empty.unity) and prefabs whose root is missing keep an empty file.
+                file_name = "scene.json" if spec.kind == "scene" else "prefab.json"
+                self._write_json(f"{folders[spec.scope_id]}/{file_name}", _scope_payload(spec, []))
+        return placements
+
+    def _resolve_component_outputs(self, placements: dict[str, str]) -> None:
+        """Point every staged hierarchy row at the JSON file that finally holds it."""
+        rewritten: list[CatalogEntry] = []
+        for entry in self._catalog:
+            if entry.output and entry.output.startswith(_TREE_OUTPUT_PREFIX):
+                final = placements.get(entry.object_id)
+                if final is None:
+                    raise PackageLayoutError(f"hierarchy object has no final location; object={entry.object_id}, "
+                                             f"source={entry.source}")
+                entry = replace(entry, output=final)
+            rewritten.append(entry)
+        self._catalog = rewritten
+
+    def _write_spines(self, by_id: dict[str, ObjectRecord], edges: dict[str, tuple[Reference, ...]]) -> None:
+        """One folder per SkeletonDataAsset: atlas, skeleton, page images and dump, all hard-linked from shared/."""
+        catalog = {entry.object_id: entry for entry in self._catalog}
+        images: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for entry in self._catalog:
+            if (entry.output and entry.output.endswith(".png") and
+                    entry.output.startswith(("shared/textures/", "shared/sprites/"))):
+                images[self._groups.get(entry.source, "_serialized"), Path(entry.output).name.lower()].append(entry.output)
+
+        def output_of(target: str | None) -> str | None:
+            entry = catalog.get(target) if target else None
+            return entry.output if entry else None
+
+        for oid in sorted(by_id):
+            anchor = by_id[oid]
+            script = by_id.get(_ref(edges, oid, "m_Script") or "")
+            if anchor.class_name != "MonoBehaviour" or script is None or script.data.get("m_ClassName") != "SkeletonDataAsset":
+                continue
+            full_group = self._groups.get(anchor.source, "_serialized")
+            folder_group = _trim_group(full_group, "spines")
+            name = _unique(_sanitize(anchor.name or f"SkeletonDataAsset_{anchor.path_id}"), 0,
+                           self._used["spines/" + folder_group])
+            folder = f"spines/{folder_group}/{name}"
+            dump = output_of(oid)
+            skeleton = output_of(_ref(edges, oid, "skeletonJSON"))
+            atlases = [output_of(_ref(edges, r.target_id, "atlasFile")) for r in edges.get(oid, ())
+                       if r.field.startswith("atlasAssets[") and r.target_id]
+            atlas_outputs = [output for output in atlases if output]
+            pages: list[str] = []
+            for output in atlas_outputs:
+                text = (self._staging / output).read_text(encoding="utf-8", errors="replace")
+                pages.extend(page for page in _atlas_pages(text) if page not in pages)
+            page_rows: list[dict[str, Any]] = []
+            for page in pages:
+                # Exported names are sanitized object names, so the page name is compared in the same form.
+                key = (_sanitize(Path(page).stem) + Path(page).suffix).lower()
+                candidates = sorted(images.get((full_group, key), []))
+                status = "linked" if len(candidates) == 1 else ("unresolved" if not candidates else "ambiguous")
+                page_rows.append({"name": page, "status": status, "shared": candidates[0] if status == "linked" else None,
+                                  "candidates": candidates})
+            links: dict[str, str] = {}
+            for link_name, output in [(Path(o).name, o) for o in [dump, skeleton, *atlas_outputs] if o] + \
+                    [(row["name"], row["shared"]) for row in page_rows if row["shared"]]:
+                if links.setdefault(link_name, output) != output:
+                    raise PackageLayoutError(f"spine folder {folder} has two files named {link_name}")
+            for link_name, output in sorted(links.items()):
+                _link(self._staging / output, self._staging / folder / link_name)
+            self._write_json(f"{folder}/manifest.json", _json_bytes({
+                "anchor": {"object_id": oid, "name": anchor.name, "source": anchor.source,
+                           "serialized_file": anchor.serialized_file, "output": dump},
+                "skeleton": skeleton, "atlases": atlas_outputs, "pages": page_rows,
+                "limitations": "Page images are matched by file name inside the same bundle group; "
+                               "runtime loading is not observed.",
+            }))
+            self._spines += 1
+
+    def _link_scopes(self, specs: list[ScopeSpec], folders: dict[str, str],
+                     edges: dict[str, tuple[Reference, ...]]) -> tuple[int, int]:
+        """Hard-link each scene's and prefab's shared assets into its folder and write its manifest."""
+        catalog = {entry.object_id: entry for entry in self._catalog}
+        plans: list[tuple[str, dict[str, Any]]] = []
+        for spec in specs:
+            folder = folders.get(spec.scope_id)
+            if folder is None:
+                continue
+            reachable = closure(set(spec.object_ids), edges)
+            assets: dict[str, dict[str, Any]] = {}
+            outputs: set[str] = set()
+            missing: list[dict[str, Any]] = []
+            for oid in sorted(reachable):
+                entry = catalog.get(oid)
+                output = entry.output if entry else None
+                if output is None:
+                    missing.append({"object_id": oid, "class_name": entry.class_name if entry else "",
+                                    "note": entry.note if entry else "object is not in the catalog"})
+                elif output.startswith("shared/"):
+                    assets.setdefault(output, {"path": output[len("shared/"):], "shared": output,
+                                               "object_id": oid, "class_name": entry.class_name})
+                elif not output.startswith(folder + "/"):
+                    outputs.add(output)
+            unresolved = sum(1 for oid in reachable for r in edges.get(oid, ()) if r.status not in {"resolved", "null"})
+            manifest = {
+                "scope_id": spec.scope_id, "kind": spec.kind, "name": spec.name, "source": spec.source,
+                "serialized_file": spec.serialized_file,
+                "assets": sorted(assets.values(), key=lambda a: a["path"]),
+                "references": sorted(outputs), "without_output": missing,
+                "unresolved_references": unresolved,
+                "limitations": "Static reference closure only; dynamic loads, remote content and "
+                               "runtime-selected assets are not covered.",
+            }
+            plans.append((folder, manifest))
+        per_file: Counter[str] = Counter(a["shared"] for _folder, manifest in plans for a in manifest["assets"])
+        most = max(per_file.values(), default=0)
+        limit = _link_limit(self._staging)
+        if limit > 0 and most > limit:
+            raise PackageLinkError(f"a shared file needs {most} links but the output volume allows {limit}")
+        links = 0
+        for folder, manifest in plans:
+            for asset in manifest["assets"]:
+                _link(self._staging / asset["shared"], self._staging / folder / asset["path"])
+                links += 1
+            self._write_json(f"{folder}/manifest.json", _json_bytes(manifest))
+        return links, most
 
     def _package_file(self, path: Path) -> None:
         rel = path.relative_to(self._root).as_posix()
         raw = path.read_bytes()
         offset = bundle_offset(raw[:_SIGNATURE_SCAN])
         group = _group_of(path, offset is not None)
+        self._groups[rel] = group
         try:
             env = self._open(path, raw, offset)
             objs = list(env.objects)
@@ -497,9 +786,10 @@ class _Packager:
                     continue
                 if category == "scripts":
                     directory = self._staging / "scripts" / "hotdll"
+                elif category == "bundles":
+                    directory = self._staging / "evidence" / "bundles" / group
                 else:
-                    trimmed = _trim_group(group, category)
-                    directory = self._staging / "assets" / category / trimmed
+                    directory = self._staging / "shared" / category / _trim_group(group, category)
                 stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
                                self._used[str(directory)])
                 if cls == "TextAsset" and category == "audio":
@@ -517,7 +807,7 @@ class _Packager:
             self._record(rel, obj, category, target, note)
 
         tree, homed, failures = _build_hierarchy(objs, exported)
-        hierarchy_output = self._write_hierarchy(Path(serialized), rel, group, tree) if tree else None
+        hierarchy_output = self._stage_hierarchy(serialized, rel, group, tree) if tree else None
         for obj in pending:
             self._record_pending(rel, obj, group, homed, hierarchy_output, failures)
         file_record, object_records = capture(rel, serialized, objs, exported)
@@ -578,21 +868,13 @@ class _Packager:
                                           output, size, note, identity(rel, serialized_name(obj, rel), obj.path_id),
                                           serialized_name(obj, rel)))
 
-    def _write_hierarchy(self, path: Path, rel: str, group: str, tree: list[dict[str, Any]]) -> str:
-        payload = _json_bytes({"source": rel, "roots": tree})
-        if _SCENE.match(path.stem):
-            self._scenes.append(path.stem)
-            folder = _unique(path.stem, 0, self._used["scene_names"])
-            target = self._staging / "scenes" / folder / "hierarchy.json"
-            category = "scenes"
-        else:
-            # A tree in an arbitrary bundle is not evidence of a prefab asset.
-            directory = self._staging / "hierarchies" / group
-            target = directory / _unique(_sanitize(path.stem) + ".json", 0, self._used[str(directory)])
-            category = "hierarchies"
-        _write(target, payload)
-        self._counts[category] += 1
-        return target.relative_to(self._staging).as_posix()
+    def _stage_hierarchy(self, serialized: str, rel: str, group: str, tree: list[dict[str, Any]]) -> str:
+        """Hold one serialized file's GameObject trees until finish() knows which scene or prefab owns each root."""
+        self._tree_seq += 1
+        target = self._staging / ".trees" / f"{self._tree_seq:06d}.json"
+        _write(target, _json_bytes({"source": rel, "serialized_file": serialized, "group": group, "roots": tree}))
+        self._trees[rel, serialized] = target
+        return _TREE_OUTPUT_PREFIX + target.name
 
     def _record_pending(self, rel: str, obj: Any, group: str, homed: set[int],
                         hierarchy_output: str | None, failures: dict[int, str]) -> None:
@@ -608,7 +890,7 @@ class _Packager:
         if obj.path_id in failures:
             self._record(rel, obj, "unclassified", None, failures[obj.path_id], output=None)
             return
-        directory = self._staging / "assets" / "objects" / _sanitize(cls, 60) / group
+        directory = self._staging / "evidence" / "unclassified" / "objects" / _sanitize(cls, 60) / group
         stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
                        self._used[str(directory)])
         target, note = _export_typetree_json(obj, stem, directory)
@@ -640,8 +922,9 @@ def package(root: Path, out_dir: Path) -> PackageResult:
     layout = resolve_layout(root)
     candidates = _candidates(layout)
     with staged_output(out_dir) as staging:
-        for sub in ("assets", "scenes", "scripts/hotdll"):
+        for sub in ("shared", "evidence", "scenes", "scripts/hotdll"):
             (staging / sub).mkdir(parents=True)
+        _require_hard_links(staging)
         packager = _Packager(unitypy, layout.root, staging)
         packager.run(candidates)
         result = packager.finish(layout.root)
@@ -657,7 +940,11 @@ def summarize(result: PackageResult) -> list[str]:
         f"objects           : {result.objects}",
         f"exported          : {result.exported} files, {result.in_hierarchy} components in hierarchy JSON, "
         f"skipped {result.skipped} (reasons in catalog.json)",
-        f"scenes            : {', '.join(result.scenes) or '-'}",
+        f"scenes            : {len(result.scenes)} folders under scenes/",
+        f"prefabs           : {result.prefabs} folders under prefabs/",
+        f"spines            : {result.spines} folders under spines/",
+        f"links             : {result.links} hard links; most links on one shared file = {result.most_links_per_file}",
+        f"layout issues     : {len(result.issues)}",
         "categories        : " + ", ".join(f"{k}={v}" for k, v in result.categories.items()),
         "model             : game_model.json (scoped identities, fields, resolved and missing references)",
         "index             : index.html (raw catalog); use `uare blueprint` for scene and system reports",

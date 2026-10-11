@@ -158,7 +158,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         result = run.stage("package", lambda: package(extract_dir, assets_dir))
         print("\n".join(summarize_package(result)))
         from uare.blueprint import blueprint
-        reconstructed = run.stage("blueprint", lambda: blueprint(workdir, workdir / "blueprint"))
+        reconstructed = run.stage("blueprint", lambda: blueprint(workdir, workdir / "blueprint", assets_dir))
         print(json.dumps(asdict(reconstructed), indent=2))
     finally:
         # Written on success and on failure: a failed run still says which stage stopped it.
@@ -315,7 +315,7 @@ def cmd_decompile(args: argparse.Namespace) -> int:
 
 def cmd_blueprint(args: argparse.Namespace) -> int:
     from uare.blueprint import blueprint
-    result = blueprint(Path(args.workdir), Path(args.out))
+    result = blueprint(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets)
     print(json.dumps(asdict(result), indent=2))
     return 0
 
@@ -336,7 +336,7 @@ def cmd_fetch_tool(args: argparse.Namespace) -> int:
 def cmd_rebuild(args: argparse.Namespace) -> int:
     from uare.rebuild import rebuild
     from uare.rebuild import summarize as summarize_rebuild
-    result = rebuild(Path(args.workdir), Path(args.out))
+    result = rebuild(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets)
     print("\n".join(summarize_rebuild(result)))
     return 0
 
@@ -526,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("package", help="capture scoped game model and export media, hierarchy and raw catalog (needs UnityPy)")
     p.add_argument("root", help="extracted tree or Unity Data directory")
-    p.add_argument("--out", required=True, help="empty directory for assets/, scripts/, scenes/, catalog.json ...")
+    p.add_argument("--out", required=True, help="empty directory for shared/, scenes/, prefabs/, spines/, evidence/, scripts/, catalog.json ...")
     p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("fetch-tool", help="download + unpack an external tool archive into vendor/")
@@ -552,12 +552,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_export_assets)
 
     p = sub.add_parser("blueprint", help="scene, asset, animation and dependency evidence for reconstruction")
-    p.add_argument("workdir", help="work directory containing extracted-assets/game_model.json")
+    p.add_argument("workdir", help="work directory containing the package output folder")
+    p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the report, browser and scope manifests")
     p.set_defaults(func=cmd_blueprint)
 
     p = sub.add_parser("rebuild", help="create a structural Unity draft and report all unresolved reconstruction bindings")
     p.add_argument("workdir", help="directory from a prior `uare run` (with analysis/, extracted-assets/, ...)")
+    p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the Unity project")
     p.set_defaults(func=cmd_rebuild)
 
@@ -585,7 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_recover_shaders)
 
     p = sub.add_parser("convert-scenes", help="convert hierarchy JSON to Unity YAML scenes/prefabs")
-    p.add_argument("source", help="directory from `uare package` (with scenes/ and/or assets/prefabs/)")
+    p.add_argument("source", help="directory from `uare package` (with game_model.json, scenes/ and prefabs/)")
     p.add_argument("--out", required=True, help="empty directory for .unity and .prefab files")
     p.set_defaults(func=cmd_convert_scenes)
 

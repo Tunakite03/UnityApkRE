@@ -12,6 +12,11 @@ Export counts and an openable project are not evidence of gameplay completeness.
 Resolve `scripts/uare` relative to this plugin. Use an existing authorized workdir
 when available; each command's output must be new or empty.
 
+Read [workspace and tool guidance](../../docs/agent-tools.md) before selecting
+inputs or installing native tools. Select the working capture using the user's
+request and verified package/version manifests. Record game-specific workspace
+choices with the capture. Reusable tools belong under `vendor/`.
+
 ## Required workflow
 
 1. Acquire the APK splits, OBB and available content within the user's request.

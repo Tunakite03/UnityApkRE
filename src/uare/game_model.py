@@ -72,7 +72,9 @@ def read_json(path: Path) -> dict[str, Json]:
 
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(json_value(value, str(path)), ensure_ascii=False,
+    # UnityPy can represent binary TextAsset bytes with surrogate escapes.
+    # JSON escapes preserve those code points without invalid UTF-8 output.
+    path.write_text(json.dumps(json_value(value, str(path)), ensure_ascii=True,
                                indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 

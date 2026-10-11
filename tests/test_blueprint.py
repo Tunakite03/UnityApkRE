@@ -94,8 +94,47 @@ class ModelTests(unittest.TestCase):
             resolve((FileRecord("a", "a", ()),), (obj("a", "a", 1, "MonoBehaviour", {
                 "bad": {"m_FileID": True, "m_PathID": 3}}),), ())
 
+    def test_binary_textasset_surrogates_roundtrip_through_blueprint(self) -> None:
+        payload = b"\xc4\xff\x00".decode("utf-8", "surrogateescape")
+        model = resolve((FileRecord("bundle", "CAB", ()),),
+                        (obj("bundle", "CAB", 1, "TextAsset", {"m_Script": payload}),), ())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_model(root / "extracted-assets" / "game_model.json", model)
+            blueprint(root, root / "blueprint")
+            recovered = load_model(root / "blueprint" / "game_model.json")
+            self.assertEqual(recovered.objects[0].data["m_Script"], payload)
+            page = (root / "blueprint" / "index.html").read_text(encoding="utf-8")
+            self.assertNotIn("\\udcc4", page)
+            chunk = root / "blueprint" / "objects" / f"{model.objects[0].id[:2]}.js"
+            script = chunk.read_text(encoding="utf-8")
+            prefix = "window.uareReceiveObjects("
+            self.assertTrue(script.startswith(prefix))
+            data = json.loads(script[len(prefix):-3])
+            self.assertEqual(data[model.objects[0].id]["m_Script"], payload)
+
 
 class BlueprintTests(unittest.TestCase):
+    def test_streamed_scene_hashes_resolve_null_container_entries_within_bundle(self) -> None:
+        files = (FileRecord("scenes.bundle", "CAB-index", ()),
+                 FileRecord("scenes.bundle", "CAB-main", ()),
+                 FileRecord("other.bundle", "CAB-main", ()))
+        objects = (
+            obj("scenes.bundle", "CAB-index", 1, "AssetBundle", {
+                "m_IsStreamedSceneAssetBundle": True,
+                "m_SceneHashes": [["Assets/Scenes/Main.unity", "CAB-main"]],
+                "m_Container": [["Assets/Scenes/Main.unity", {"asset": ptr(0, 0)}]]}),
+            obj("scenes.bundle", "CAB-main", 1, "GameObject", {"m_Name": "Scene root"}),
+            obj("other.bundle", "CAB-main", 1, "GameObject", {"m_Name": "Unclassified root"}),
+        )
+        reports = scene_reports(resolve(files, objects, ()))
+        scenes = [r for r in reports if r["kind"] == "scene"]
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(scenes[0]["name"], "Assets/Scenes/Main.unity")
+        self.assertEqual(scenes[0]["classification_evidence"], "AssetBundle.m_SceneHashes")
+        self.assertEqual(scenes[0]["source"], "scenes.bundle")
+        self.assertEqual(sum(r["kind"] == "unclassified_hierarchy" for r in reports), 1)
+
     def test_scene_usage_scripts_animations_and_events_are_joined(self) -> None:
         scope = scene_reports(fixture_model())[0]
         self.assertEqual(scope["kind"], "scene")

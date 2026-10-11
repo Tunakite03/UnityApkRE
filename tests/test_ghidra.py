@@ -14,6 +14,8 @@ from uare.ghidra import (
 
 _FAKE_HEADLESS = """#!{python}
 import os, sys
+from pathlib import Path
+assert not any(part.startswith(".") for part in Path(sys.argv[1]).parts)
 i = sys.argv.index("-postScript")
 out = sys.argv[i + 2]
 os.makedirs(os.path.join(out, "decompiled"), exist_ok=True)
@@ -23,6 +25,8 @@ with open(os.path.join(out, "functions.tsv"), "w") as f:
 if "decompile" in sys.argv:
     with open(os.path.join(out, "decompiled", "0x100000_ShopPage_Buy.c"), "w") as f:
         f.write("void ShopPage_Buy(void){{}}\\n")
+with open(os.path.join(out, "export-complete.txt"), "w") as f:
+    f.write("complete\\n")
 """
 
 
@@ -48,7 +52,7 @@ class GhidraTests(unittest.TestCase):
 
     def test_build_command_shape(self) -> None:
         argv = build_command("/opt/ghidra/analyzeHeadless", Path("/proj"), Path("/x.so"),
-                             Path("/s/uare_export.py"), Path("/out"), decompile=True)
+                             Path("/s/UareExport.java"), Path("/out"), decompile=True)
         self.assertIn("-import", argv)
         self.assertIn("/x.so", argv)
         self.assertIn("decompile", argv)
@@ -76,6 +80,14 @@ class GhidraTests(unittest.TestCase):
     def test_resolve_missing_is_an_error(self) -> None:
         with self.assertRaises(UareError):
             resolve_ghidra(None, {}, self.tmp / "vendor", lambda name: None)
+
+    def test_zero_exit_without_completed_export_is_an_error(self) -> None:
+        headless = _write_exec(self.tmp / "analyzeHeadless", "#!/bin/sh\nexit 0\n")
+        so = self.tmp / "libil2cpp.so"
+        so.write_bytes(b"\x7fELF")
+        with self.assertRaisesRegex(UareError, "export did not complete"):
+            decompile(so, self.tmp / "out", str(headless))
+        self.assertFalse((self.tmp / "out").exists())
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import html
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from uare.game_model import (GameModel, Json, ModelError, ObjectRecord, Reference, array,
@@ -135,6 +135,19 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
     by_id = {o.id: o for o in model.objects}
     edges = outgoing(model)
     aliases = _bundle_assets(model, edges)
+    scene_hashes: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for obj in model.objects:
+        if obj.class_name != "AssetBundle" or obj.data.get("m_IsStreamedSceneAssetBundle") is not True:
+            continue
+        entries = obj.data.get("m_SceneHashes", [])
+        if not isinstance(entries, list):
+            continue
+        for pair in entries:
+            if (isinstance(pair, list) and len(pair) == 2 and
+                    isinstance(pair[0], str) and pair[0].endswith(".unity") and isinstance(pair[1], str)):
+                # Streamed scenes have null container PPtrs. Unity records their
+                # serialized file identities separately, scoped to this bundle.
+                scene_hashes[obj.source, pair[1]].add(pair[0])
     build_orders = [o for o in model.objects if o.class_name == "BuildSettings" and
                     isinstance(o.data.get("m_Scenes"), list)]
     build_order = build_orders[0].data["m_Scenes"] if len(build_orders) == 1 else []
@@ -145,11 +158,14 @@ def scene_reports(model: GameModel) -> list[dict[str, Json]]:
     for file in model.files:
         ids = by_file[file.source, file.serialized_file]
         match = _LEVEL.fullmatch(file.serialized_file)
-        scene_aliases = sorted({alias for oid in ids for alias in aliases.get(oid, []) if alias.endswith(".unity")})
+        hashed_scenes = scene_hashes.get((file.source, file.serialized_file), set())
+        scene_aliases = sorted(hashed_scenes | {
+            alias for oid in ids for alias in aliases.get(oid, []) if alias.endswith(".unity")})
         if match or scene_aliases or file.serialized_file.endswith(".unity"):
             index = int(match[1]) if match else None
             name = scene_aliases[0] if scene_aliases else file.serialized_file
-            evidence = "asset_container" if scene_aliases else "serialized_filename"
+            evidence = ("AssetBundle.m_SceneHashes" if hashed_scenes else
+                        "asset_container" if scene_aliases else "serialized_filename")
             if index is not None and isinstance(build_order, list) and index < len(build_order):
                 item = build_order[index]
                 if isinstance(item, str):
@@ -417,6 +433,20 @@ def _markdown(report: dict[str, Json]) -> str:
     return "\n".join(lines)
 
 
+def _write_object_chunks(staging: Path, model: GameModel) -> list[dict[str, object]]:
+    chunks: dict[str, dict[str, dict[str, Json]]] = defaultdict(dict)
+    summaries: list[dict[str, object]] = []
+    for obj in model.objects:
+        chunks[obj.id[:2]][obj.id] = obj.data
+        summaries.append(asdict(replace(obj, data=obj.data if obj.class_name == "MonoScript" else {})))
+    directory = staging / "objects"
+    directory.mkdir()
+    for prefix, fields in sorted(chunks.items()):
+        payload = json.dumps(fields, ensure_ascii=True).replace("<", "\\u003c")
+        (directory / f"{prefix}.js").write_text(f"window.uareReceiveObjects({payload});\n", encoding="utf-8")
+    return summaries
+
+
 def write_blueprint(workdir: Path, out_dir: Path, model: GameModel) -> BlueprintResult:
     report = build_report(model, workdir)
     with staged_output(out_dir) as staging:
@@ -426,7 +456,8 @@ def write_blueprint(workdir: Path, out_dir: Path, model: GameModel) -> Blueprint
             row = record(scope, "scope")
             write_json(staging / "scopes" / f"{row['id']}.json", row)
         (staging / "overview.md").write_text(_markdown(report), encoding="utf-8")
-        payload = json.dumps({"report": report, "objects": [asdict(o) for o in model.objects],
+        summaries = _write_object_chunks(staging, model)
+        payload = json.dumps({"report": report, "objects": summaries,
                               "references": [asdict(r) for r in model.references]}, ensure_ascii=True).replace("<", "\\u003c")
         (staging / "index.html").write_text(_HTML.replace("__PAYLOAD__", payload), encoding="utf-8")
     scopes = [record(s, "scope") for s in array(report["scopes"], "scopes")]
@@ -452,18 +483,22 @@ _HTML = """<!doctype html><html lang="en"><meta charset="utf-8">
 'use strict';
 const data=JSON.parse(document.getElementById('data').textContent),report=data.report;
 const objects=new Map(data.objects.map(o=>[o.id,o])),out=new Map(),used=new Map();
+const objectFields=new Map(),chunks=new Map();
+window.uareReceiveObjects=entries=>{for(const [id,fields]of Object.entries(entries))objectFields.set(id,fields)};
+function loadFields(id){const prefix=id.slice(0,2);if(!chunks.has(prefix)){chunks.set(prefix,new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='objects/'+prefix+'.js';script.onload=resolve;script.onerror=()=>{chunks.delete(prefix);reject(new Error('Cannot load object data. Keep index.html and the objects folder together.'))};document.head.append(script)}))}return chunks.get(prefix).then(()=>{if(!objectFields.has(id))throw new Error('Object data is missing from its chunk.');return objectFields.get(id)})}
 for(const r of data.references){if(!out.has(r.source_id))out.set(r.source_id,[]);out.get(r.source_id).push(r);if(r.target_id){if(!used.has(r.target_id))used.set(r.target_id,[]);used.get(r.target_id).push(r)}}
 const detail=document.getElementById('detail');
 function element(tag,text,parent){const e=document.createElement(tag);e.textContent=text;parent.append(e);return e}
 function show(title){detail.replaceChildren();element('h2',title,detail)}
 function json(value,parent){element('pre',JSON.stringify(value,null,2),parent)}
 function link(id,parent,prefix=''){const o=objects.get(id);if(!o){element('p',prefix+'Unresolved object',parent);return}const b=element('button',prefix+(o.name||o.class_name)+' · '+o.class_name,parent);b.onclick=()=>object(id)}
-function object(id){const o=objects.get(id);show(o.name||o.class_name);element('p',o.source+' / '+o.serialized_file+' #'+o.path_id,detail);element('p','Extraction: '+o.data_status,detail);for(const issue of o.issues)element('p',issue,detail);const fields=element('details','',detail);element('summary','Serialized fields',fields);json(o.data,fields);const script=report.script_inventory.find(s=>s.object_id===id);if(script){element('h3','Script metadata and members',detail);json(script,detail)}element('h3','References',detail);for(const r of out.get(id)||[]){if(r.target_id)link(r.target_id,detail,r.field+' → ');else element('p',r.field+': '+r.status,detail)}element('h3','Used by',detail);for(const r of used.get(id)||[])link(r.source_id,detail,r.field+' ← ')}
+function object(id){const o=objects.get(id);show(o.name||o.class_name);element('p',o.source+' / '+o.serialized_file+' #'+o.path_id,detail);element('p','Extraction: '+o.data_status,detail);for(const issue of o.issues)element('p',issue,detail);const fields=element('details','',detail);element('summary','Serialized fields (load on demand)',fields);let loaded=false;fields.ontoggle=()=>{if(fields.open&&!loaded){loaded=true;const status=element('p','Loading fields…',fields);loadFields(id).then(value=>{status.remove();json(value,fields)}).catch(error=>{status.textContent=error.message;loaded=false})}};const script=report.script_inventory.find(s=>s.object_id===id);if(script){element('h3','Script metadata and members',detail);json(script,detail)}element('h3','References',detail);for(const r of out.get(id)||[]){if(r.target_id)link(r.target_id,detail,r.field+' → ');else element('p',r.field+': '+r.status,detail)}element('h3','Used by',detail);for(const r of used.get(id)||[])link(r.source_id,detail,r.field+' ← ')}
 function tree(nodes,parent){for(const n of nodes){const d=element('details','',parent);element('summary',n.name||n.id,d);link(n.id,d);for(const c of n.components||[]){if(c.id)link(c.id,d);else element('p','Component: '+c.status,d)}tree(n.children||[],d)}}
 function scope(s){show(s.name);element('p',s.kind+' · '+s.classification_evidence,detail);element('h3','Hierarchy and components',detail);tree(s.roots,detail);for(const [label,key]of [['Direct assets','direct_assets'],['Transitive assets','transitive_assets'],['Animations','animation_objects'],['Scene settings','scene_settings']]){element('h3',label,detail);for(const id of s[key])link(id,detail)}element('h3','Behavior analysis',detail);const claims=report.behavior_claims.filter(c=>c.scope_id===s.id);if(!claims.length)element('p','No verified behavior analysis yet. Inspect script fields, events and code evidence.',detail);for(const c of claims){element('p',c.system+': '+c.statement+' ['+c.basis+']',detail);json(c.citations,detail)}element('h3','Script bindings, events and missing evidence',detail);json({script_bindings:s.script_bindings,events:s.events,logic:s.logic,dynamic_loading:s.dynamic_loading,unresolved_references:s.unresolved_references,hierarchy_issues:s.hierarchy_issues},detail)}
 function overview(){show('Reconstruction readiness');element('p','The supplied files describe '+report.coverage.objects+' objects in '+report.coverage.files+' serialized files. Coverage does not include undiscovered or remote content.',detail);element('h3','Serialized references',detail);const counts=element('ul','',detail);for(const [key,value] of Object.entries(report.coverage.references))element('li',key+': '+value,counts);element('h3','Object recovery',detail);const states=element('ul','',detail);for(const [key,value] of Object.entries(report.coverage.object_data))element('li',key+': '+value,states);element('h3','Engine',detail);element('p','Backend: '+report.engine.scripting_backend+' · Unity versions: '+Object.keys(report.engine.unity_versions).join(', '),detail);element('h3','Packages and services',detail);if(!report.dependencies.length)element('p','No supported signatures found in the supplied evidence. This does not prove that dependencies are absent.',detail);for(const dep of report.dependencies){const row=element('details','',detail);element('summary',dep.name+' · '+dep.kind+' · version unknown',row);element('p','Runtime usage unverified. Evidence:',row);for(const source of dep.evidence){if(objects.has(source))link(source,row);else element('p',source,row)}}const libraries=element('details','',detail);element('summary','All managed and native libraries, including unclassified dependencies',libraries);for(const item of report.library_inventory)element('p',item.name+' · '+item.kind+' · '+item.classification,libraries);element('h3','Core game and system analysis',detail);const claims=report.behavior_claims.filter(c=>c.scope_id==='game');if(!claims.length)element('p','Core loop, progression, saving and backend behavior have not been established. Add analysis with source citations.',detail);for(const c of claims){element('p',c.system+': '+c.statement+' ['+c.basis+']',detail);json(c.citations,detail)}element('h3','Observed behavior',detail);for(const o of report.observations)element('p',o.action+' → '+o.result+' · '+o.evidence,detail);if(!report.observations.length)element('p','No runtime observations supplied.',detail);element('h3','Missing evidence and limits',detail);const limits=element('ul','',detail);for(const item of [...report.blockers,...report.limitations])element('li',item,limits);element('h3','Validation',detail);element('p','Unity import: not tested · Compilation: not tested · Play Mode: not tested',detail)}
 const nav=document.getElementById('scopes');for(const s of report.scopes){const b=element('button',s.name+' · '+s.kind,nav);b.onclick=()=>scope(s)}
 document.getElementById('overview').onclick=overview;
 document.getElementById('search').oninput=e=>{const q=e.target.value.toLowerCase(),results=document.getElementById('results');results.replaceChildren();let count=0;for(const o of data.objects){if(q&&(o.name+' '+o.class_name+' '+o.source+' '+JSON.stringify(o.class_name==='MonoScript'?o.data:{})).toLowerCase().includes(q)){count++;if(count<=100)link(o.id,results)}}element('p',count+' objects; showing first 100',results)};
-overview();
+const initial=location.hash.slice(1),initialScope=report.scopes.find(s=>initial==='scope/'+s.id);
+if(initialScope)scope(initialScope);else if(initial.startsWith('object/')&&objects.has(initial.slice(7)))object(initial.slice(7));else overview();
 </script></html>"""

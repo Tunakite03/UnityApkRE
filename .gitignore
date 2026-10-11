@@ -11,3 +11,10 @@ dist/
 .*.partial/
 
 .DS_Store
+
+# Local optional tool payloads; keep launchers and agent guidance in Git.
+/vendor/ghidra/app/
+/vendor/il2cpp-dumper/*
+!/vendor/il2cpp-dumper/Il2CppDumper
+/vendor/jdk21/
+/vendor/ilspy/

@@ -5,17 +5,18 @@
 C decompilation of every function. The addresses line up with the RVAs from `uare il2cpp-enrich`,
 so a method name can be joined to its pseudo-C.
 
-Ghidra is not bundled. Point at it with `--ghidra`, `UARE_GHIDRA`, a vendored copy under
-vendor/ghidra, or `analyzeHeadless` on PATH; `uare fetch-tool` can download the release archive.
-The post-script is Jython (Ghidra 9/10, or 11 with the Jython extension); this module writes it on
-demand, so nothing is executed without the user asking.
+Point at Ghidra with `--ghidra`, `UARE_GHIDRA`, a local copy under vendor/ghidra,
+or `analyzeHeadless` on PATH. The Java post-script works without a Jython extension.
+See docs/agent-tools.md for the local distribution and JDK launcher.
 """
 
 import logging
 import os
 import subprocess
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Callable, Mapping
 
 from uare.errors import UareError
@@ -27,40 +28,70 @@ LOG = logging.getLogger("uare.ghidra")
 DEFAULT_VENDOR_ROOT = Path(__file__).resolve().parents[2] / "vendor" / "ghidra"
 _HEADLESS_NAMES = ("analyzeHeadless.bat", "analyzeHeadless", "support/analyzeHeadless", "support/analyzeHeadless.bat")
 _PROJECT_NAME = "uare_headless"
-_MAX_STDERR = 800
 
-# Jython post-script run by analyzeHeadless. getScriptArgs()[0] is the output directory;
-# getScriptArgs()[1], when present, is "decompile".
-_SCRIPT = '''# uare Ghidra export: function list + optional C decompilation.
-import os
-from ghidra.app.decompiler import DecompInterface
-from ghidra.util.task import ConsoleTaskMonitor
+# Java post-script: arguments are the output directory and optionally "decompile".
+_SCRIPT = r'''// @category UARE
+import ghidra.app.script.GhidraScript;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionIterator;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
-args = getScriptArgs()
-out_dir = args[0]
-do_decompile = len(args) > 1 and args[1] == "decompile"
-fm = currentProgram.getFunctionManager()
-monitor = ConsoleTaskMonitor()
-decomp = DecompInterface()
-decomp.openProgram(currentProgram) if do_decompile else None
-
-with open(os.path.join(out_dir, "functions.tsv"), "w") as listing:
-    for func in fm.getFunctions(True):
-        entry = func.getEntryPoint()
-        name = func.getName()
-        size = func.getBody().getNumAddresses()
-        listing.write("%s\\t%s\\t%d\\n" % (entry, name, size))
-        if not do_decompile:
-            continue
-        try:
-            res = decomp.decompileFunction(func, 30, monitor)
-            if res and res.decompileCompleted():
-                safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[:80]
-                path = os.path.join(out_dir, "decompiled", "%s_%s.c" % (entry, safe))
-                with open(path, "w") as cfile:
-                    cfile.write(res.getDecompiledFunction().getC())
-        except Exception as exc:
-            print("uare: decompile failed for %s: %s" % (entry, exc))
+public class UareExport extends GhidraScript {
+    @Override
+    protected void run() throws Exception {
+        String[] args = getScriptArgs();
+        if (args.length < 1 || args.length > 2 ||
+                (args.length == 2 && !args[1].equals("decompile"))) {
+            throw new IllegalArgumentException("Usage: UareExport.java <output> [decompile]");
+        }
+        Path output = Path.of(args[0]);
+        Files.createDirectories(output);
+        boolean exportCode = args.length == 2;
+        DecompInterface decompiler = new DecompInterface();
+        try {
+            if (exportCode) {
+                Files.createDirectories(output.resolve("decompiled"));
+                if (!decompiler.openProgram(currentProgram)) {
+                    throw new IOException("Cannot open program: " + decompiler.getLastMessage());
+                }
+            }
+            try (BufferedWriter listing = Files.newBufferedWriter(
+                    output.resolve("functions.tsv"), StandardCharsets.UTF_8)) {
+                FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
+                while (functions.hasNext()) {
+                    monitor.checkCancelled();
+                    Function function = functions.next();
+                    String address = function.getEntryPoint().toString();
+                    String name = function.getName();
+                    listing.write(address + "\t" + name + "\t" +
+                            function.getBody().getNumAddresses() + "\n");
+                    if (exportCode) {
+                        DecompileResults result = decompiler.decompileFunction(function, 30, monitor);
+                        if (!result.decompileCompleted() || result.getDecompiledFunction() == null) {
+                            throw new IOException("Decompilation failed at " + address + ": " +
+                                    result.getErrorMessage());
+                        }
+                        String safeName = name.replaceAll("[^a-zA-Z0-9._-]", "_");
+                        safeName = safeName.substring(0, Math.min(80, safeName.length()));
+                        Files.writeString(output.resolve("decompiled").resolve(
+                                address + "_" + safeName + ".c"),
+                                result.getDecompiledFunction().getC(), StandardCharsets.UTF_8);
+                    }
+                }
+            }
+            Files.writeString(output.resolve("export-complete.txt"), "complete\n",
+                    StandardCharsets.UTF_8);
+        } finally {
+            decompiler.dispose();
+        }
+    }
+}
 '''
 
 
@@ -114,7 +145,7 @@ def resolve_ghidra(explicit: str | None, environ: Mapping[str, str], vendor_root
 
 def write_script(script_dir: Path) -> Path:
     script_dir.mkdir(parents=True, exist_ok=True)
-    path = script_dir / "uare_export.py"
+    path = script_dir / "UareExport.java"
     path.write_text(_SCRIPT, encoding="utf-8")
     return path
 
@@ -150,9 +181,11 @@ def decompile(so: Path, out_dir: Path, ghidra: str, *, decompile_functions: bool
               timeout: float = 7200.0, project_dir: Path | None = None) -> GhidraResult:
     if not so.is_file():
         raise GhidraError(f"{so} not found")
-    with staged_output(out_dir) as staging:
+    with staged_output(out_dir) as staging, ExitStack() as cleanup:
         script = write_script(staging / "scripts")
-        project = project_dir or (staging / "project")
+        # Ghidra 12 rejects dot-prefixed project path components; staged outputs
+        # are hidden, so keep the disposable analysis project outside staging.
+        project = project_dir or Path(cleanup.enter_context(TemporaryDirectory(prefix="uare-ghidra-")))
         project.mkdir(parents=True, exist_ok=True)
         argv = build_command(ghidra, project, so, script, staging, decompile_functions)
         event(LOG, logging.INFO, "ghidra_run", so=str(so), decompile=decompile_functions)
@@ -161,7 +194,16 @@ def decompile(so: Path, out_dir: Path, ghidra: str, *, decompile_functions: bool
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GhidraError(f"could not run Ghidra: {exc}") from exc
         if proc.returncode != 0:
-            raise GhidraError(f"analyzeHeadless exited {proc.returncode}: {(proc.stderr or proc.stdout)[-_MAX_STDERR:]}")
+            raise GhidraError(
+                f"analyzeHeadless exited {proc.returncode}: "
+                + (proc.stderr + "\n" + proc.stdout)[-4000:]
+            )
+        # Ghidra may exit zero after a post-script error; require script completion.
+        if not (staging / "export-complete.txt").is_file():
+            raise GhidraError(
+                "Ghidra export did not complete; post-script failed: "
+                + (proc.stderr + "\n" + proc.stdout)[-4000:]
+            )
         functions = parse_functions(staging / "functions.tsv")
         decompiled = len(list((staging / "decompiled").glob("*.c"))) if (staging / "decompiled").is_dir() else 0
     return GhidraResult(ghidra=ghidra, functions=len(functions), decompiled=decompiled, out_dir=str(out_dir))

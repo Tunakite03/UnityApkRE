@@ -25,7 +25,8 @@ rules from class names. Unknown versions, missing references, remote content and
 unverified gameplay remain explicit. Authorized work proceeds without a mandatory
 repeated scope checkpoint.
 
-See [the reconstruction architecture](docs/redesign.md) for data contracts and limits.
+See [the reconstruction architecture](docs/redesign.md) for data contracts and limits,
+and the [Step-by-Step Guide](docs/guide.md) ([tiếng Việt](docs/huong-dan.md)) for a complete workflow walkthrough.
 
 ## Quick start
 
@@ -46,8 +47,12 @@ and review animation objects and missing evidence. `overview.md` is the compact 
 point and `report.json` / `scopes/*.json` are machine-readable.
 
 Existing category-only exports must be repackaged with this version: their path IDs
-cannot safely distinguish objects in different serialized files. Use a fresh output
-workdir; never overwrite earlier results.
+cannot safely distinguish objects in different serialized files. Use a fresh
+output directory within the existing workspace; never overwrite earlier results.
+
+Agents should read [AGENTS.md](AGENTS.md) and the
+[workspace and local tool guide](docs/agent-tools.md). The guide explains capture
+selection and optional vendored native/managed tools for any supported game.
 
 The default rebuild manifest has no guessed package versions. Explicit reconstruction
 choices can be provided in `<workdir>/rebuild-packages.json` under `dependencies`.
@@ -143,4 +148,4 @@ Layout:
   - `explore-il2cpp/` -- IL2CPP name exploration
   - `operate-and-test/` -- testing and verification
 - `.claude-plugin/` -- plugin and marketplace manifests
-- `vendor/` -- bundled adb platform-tools
+- `vendor/` -- bundled adb platform-tools, tracked launchers and local optional analysis tools (payloads Git-ignored)

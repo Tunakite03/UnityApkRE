@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Use the local distribution and an explicit or vendored JDK, without a prompt.
+set -euo pipefail
+TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -x "$TOOL_DIR/app/support/analyzeHeadless" ]]; then
+  echo "Ghidra: missing vendor/ghidra/app/support/analyzeHeadless; see docs/agent-tools.md" >&2
+  exit 2
+fi
+if [[ -z "${JAVA_HOME:-}" ]]; then
+  if [[ -x "$TOOL_DIR/../jdk21/Contents/Home/bin/java" ]]; then
+    export JAVA_HOME="$TOOL_DIR/../jdk21/Contents/Home"
+  elif [[ -x "$TOOL_DIR/../jdk21/bin/java" ]]; then
+    export JAVA_HOME="$TOOL_DIR/../jdk21"
+  else
+    echo "Ghidra: vendored JDK missing; set JAVA_HOME to a compatible JDK (21+ for Ghidra 12.1.4)" >&2
+    exit 2
+  fi
+fi
+if [[ ! -x "$JAVA_HOME/bin/java" || ! -x "$JAVA_HOME/bin/javac" ]]; then
+  echo "Ghidra: JAVA_HOME must contain executable bin/java and bin/javac" >&2
+  exit 2
+fi
+export PATH="$JAVA_HOME/bin:$PATH"
+exec "$TOOL_DIR/app/support/analyzeHeadless" "$@" </dev/null

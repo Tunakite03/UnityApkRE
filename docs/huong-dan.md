@@ -3,6 +3,8 @@
 > primary result. The mandatory checkpoint and category-only rebuild described
 > in the older guide below are superseded by [the reconstruction architecture](redesign.md)
 > and the current `rebuild-game` skill. Legacy exports require repackaging.
+>
+> *(Bản tiếng Anh của hướng dẫn này: [guide.md](guide.md).)*
 
 # Hướng dẫn: unity-apk-re từng bước
 
@@ -232,7 +234,7 @@ Kết quả:
 | `export-assets --backend unitypy` | `objects.jsonl`, `textassets/`, `textures/` (PNG), `audio/` (WAV), `meshes/` (OBJ), `monobehaviours/` (JSON), `monoscripts.tsv` |
 
 - `il2cpp-enrich` gọi dumper đúng convention `Il2CppDumper <libil2cpp.so> <global-metadata.dat> <out_dir>`. Tìm tool theo thứ tự: `--dumper`, `UARE_IL2CPP_DUMPER`, `vendor/il2cpp-dumper/`, PATH.
-- `decompile` chạy `analyzeHeadless` với script post-analysis; tìm theo `--ghidra`, `UARE_GHIDRA`, `vendor/ghidra/`, PATH. Ghidra không đi kèm; script dùng Jython (Ghidra 9/10, hoặc 11 kèm extension Jython).
+- `decompile` chạy `analyzeHeadless` với script Java post-analysis, không cần Jython; tìm theo `--ghidra`, `UARE_GHIDRA`, `vendor/ghidra/`, PATH. Launcher trong `vendor/ghidra` chọn JDK cục bộ. Xem [hướng dẫn workspace và tools cho agent](agent-tools.md) để chọn workspace theo manifest, kiểm tra runtime và sử dụng tool trong `vendor`. Payload của các tool tùy chọn không nằm trong Git.
 - `--backend auto` mặc định: dùng UnityPy nếu đã cài, ngược lại rơi về backend stdlib.
 - Địa chỉ trong `functions.tsv` khớp RVA trong `methods_rva.tsv`, nên ghép được tên method với pseudo-C.
 
@@ -269,7 +271,7 @@ extracted-assets/
 
 `<nhóm>` lấy từ tên bundle YooAsset (bốn token đầu, bỏ tiền tố `gamepackage_` và mã hash), ví dụ `assets_gameassets_sprite_pet/`. Các object cùng bundle nằm cùng thư mục.
 
-- **Mở được cả bundle YooAsset**: nhiều game (như Tower Pet) chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì**.
+- **Mở được cả bundle YooAsset**: một số build chèn một header ngắn trước magic `UnityFS`. `package` tự dò và bỏ qua header đó (`bundle_offset`), **không giải mã gì**.
 - **Hot-update DLL**: `GameHotfix_*.dll` trong bundle thường ở dạng mã hóa (không có header PE). `package` giữ nguyên; để giải mã, chạy `decrypt-hotdll` ở bước 11 bên dưới.
 - Object nào không xuất được (texture placeholder 0×0, type tree lỗi...) đều ghi vào `catalog.json` kèm lý do, không bỏ im lặng.
 - `index.html` mở bằng trình duyệt để duyệt thẳng (ảnh có thumbnail).
@@ -279,14 +281,13 @@ extracted-assets/
 Game dùng **HybridCLR** (hoặc tương tự) mã hóa các assembly hot-update thành `MAGIC || ciphertext` và giấu key trong chính metadata AOT: trình biên dịch C# đặt các mảng `new byte[]{...}` vào class `<PrivateImplementationDetails>`, **tên field chính là SHA-256 của dữ liệu**, giá trị nằm trong blob `fieldAndParameterDefaultValueData` của `global-metadata.dat`.
 
 ```bash
-scripts/uare decrypt-hotdll re/towerpet/extracted-assets/scripts/hotdll --out re/towerpet/hotdll-decrypted
+scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<workdir>/hotdll-decrypted"
 ```
 
 - Công cụ gom **mọi mảng constant** từ metadata, **tự kiểm chứng từng mảng bằng SHA-256 lấy từ tên field** (không đoán), rồi thử lần lượt AES-128-CBC / AES-128-GCM / ChaCha20 / RC4 / XOR với các độ dài magic thường gặp. Một tổ hợp chỉ được chấp nhận khi **cả file nhỏ nhất giải ra đúng PE** (và padding PKCS#7 khớp với CBC); không tìm được thì báo lỗi, không đoán.
 - Không cần `libil2cpp.so` — key nằm hoàn toàn trong metadata. Không cần cài thêm gì (AES/RC4/ChaCha20 có bản thuần Python); cài `pip install "uare[crypto]"` để chạy nhanh hơn với pycryptodome.
 - Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`.
 - Nếu game dùng thuật toán riêng: đưa key trực tiếp qua `--algo --key --iv --magic`.
-- Với Tower Pet: 219 mảng được kiểm chứng, tìm ra **AES-128-CBC** với key `419c...2cc3`, IV `1b8e...297e`, magic 8 byte `21f7ddab31690c08` — giải mã xong **19/19 DLL** (GamePlay, GameCore, UIResources, GameConfig, GameHotfix...), tức toàn bộ logic gameplay.
 
 **`export-assets`** đọc mọi SerializedFile và xuất ra:
 

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the local managed dumper with the host .NET runtime.
+set -euo pipefail
+TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v dotnet >/dev/null 2>&1; then
+  echo "Il2CppDumper: dotnet is missing from PATH; see docs/agent-tools.md" >&2
+  exit 127
+fi
+if [[ ! -f "$TOOL_DIR/Il2CppDumper.dll" ]]; then
+  echo "Il2CppDumper: missing vendor/il2cpp-dumper/Il2CppDumper.dll; see docs/agent-tools.md" >&2
+  exit 2
+fi
+# The local net6 build also runs on the installed .NET 10 runtime.
+exec dotnet --roll-forward Major "$TOOL_DIR/Il2CppDumper.dll" "$@" </dev/null

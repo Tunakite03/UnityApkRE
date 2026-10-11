@@ -94,7 +94,10 @@ The path in quotes is the first argument; replace `<workdir>` with the work dire
 ## Rules for an agent
 
 - Do not run `pull` or `run` against a device unless the user asked for it in this conversation.
-- Never reuse a work directory. Pick a new name and say which one you used.
+- Reuse an existing capture for follow-up analysis; each producing command needs
+  a new or empty output directory. A fresh `run` requires a new workspace. Do not
+  create another competing game root just to retry one stage. See
+  [workspace and tool guidance](../../docs/agent-tools.md).
 - Do not decrypt, patch or re-sign anything. Hot-update assemblies stay as stored; the toolkit does not decrypt them.
 - Report exactly what the command printed, including errors. Do not claim a check passed unless you ran it.
 

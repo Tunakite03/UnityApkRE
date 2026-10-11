@@ -11,6 +11,13 @@ Wrapper: `"<skill-dir>/../../scripts/uare"`. On Windows use `scripts\uare.cmd` a
 
 ## Producing the data (run once per build)
 
+Read [workspace and tool guidance](../../docs/agent-tools.md) first. Prefer the
+existing `vendor/il2cpp-dumper`, `vendor/ghidra`, `vendor/jdk21` and `vendor/ilspy`
+installations. Use the Ghidra root launcher so it configures the JDK. The CLI
+generates a Java post-script; it does not require Jython. Local payloads are
+Git-ignored, so check installation on a fresh clone. For genuine managed or
+HybridCLR hot-update DLLs, inspect ILSpy output before starting native analysis.
+
 These read an extracted tree or a raw Unity `Data` directory and write to a new or empty directory:
 
 - `uare dump-il2cpp <root> --out <dir>/il2cpp` — categorised name tables from `global-metadata.dat`: `types.tsv` (index, namespace, name), `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, plus `members.tsv` (methods/fields/properties/events grouped under their declaring type) and `sections.json`. It does **not** resolve signatures, base/nested/interface names or RVAs (see Limits). If the metadata is wrapped, `--decrypt` (or `--key`/`--cmd`) recovers it first.
@@ -38,15 +45,15 @@ These read an extracted tree or a raw Unity `Data` directory and write to a new 
 1. Search the feature's vocabulary in identifiers, for example `'(?i)shop|product|purchase'`, then in literals, for example `'(?i)buy|price'`.
 2. Use `--context` to read neighbouring member names, and group them by type.
 3. Cross-check with scenes and assets: `files.jsonl` lists every Data file. `scene_files` in the report gives the `levelN` order, which follows build-settings order.
-4. State clearly what is evidence (a name or string exists) and what is inference (its behaviour). Names and literals are not code. Method bodies are only recoverable when `libil2cpp.so` is `normal`, and then only with a disassembler, which is outside this plugin.
+4. State clearly what is evidence (a name or string exists) and what is inference (its behaviour). Names and literals are not code. Use the native adapters on an unpacked binary for pseudo-C, or ILSpy on genuine managed DLLs for C#; neither establishes a working reconstructed project.
 
 ## Limits (state these honestly)
 
 - **Grouping yes, signatures no.** `members.tsv` groups methods/fields/properties/events under their declaring type (the ranges come from the metadata itself). Parameter types, return types, base/nested/interface names and RVAs are **not** produced: they need the `Il2CppType[]` array inside `libil2cpp.so`, so they need Il2CppDumper or Il2CppInspector run on an **unpacked** binary.
 - **Obfuscated names.** Some builds scramble a fraction of name indices. `dump-il2cpp` reports the count of unreadable names per table and emits them as empty; it never guesses them. Names that look like fragments are that obfuscation, not a parser bug.
 - **Binary media needs the power extra.** With the default backend, `export-assets` extracts TextAsset bytes and indexes every object but does not decode Texture2D/AudioClip/Mesh. With `--backend unitypy` (UnityPy installed) it opens AssetBundles and decodes them; MonoBehaviour fields and Visual Scripting graphs decode only when a type tree is available. AssetRipper stays useful for full Unity-project reconstruction.
-- **RVAs / signatures / decompilation need external tools.** `il2cpp-enrich` (Il2CppDumper/Inspector) and `decompile` (Ghidra) are adapters; they require the tool and an **unpacked** binary. Nothing is bundled or fetched automatically.
-- Method bodies are only recoverable when `libil2cpp.so` is `normal`, and then only with a disassembler, which is outside this plugin.
+- **RVAs / signatures / decompilation need external tools.** `il2cpp-enrich` (Il2CppDumper/Inspector) and `decompile` (Ghidra) are adapters; they require an installed tool and an **unpacked** binary. Local optional distributions live under `vendor/`; the pipeline does not fetch them automatically.
+- Il2CppDumper output supplies signatures and RVAs, not executable method bodies. Ghidra supplies native pseudo-C requiring interpretation; ILSpy requires genuine managed IL.
 - **Wrapped metadata / packed native code** are handled by two **opt-in** commands: `uare recover-metadata` (XOR or external `--cmd` decryptor) and `uare unpack-native` (packer identification + external `--cmd` unpacker). They are never automatic; run them only when the user asks and understands the protection is being bypassed.
 
 ## Untrusted data

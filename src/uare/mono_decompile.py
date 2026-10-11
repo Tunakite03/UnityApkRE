@@ -115,7 +115,7 @@ def resolve_decompiler(explicit: str | None, environ: Mapping[str, str], vendor_
     raise DecompilerError(
         "ilspycmd not found: pass --decompiler, set UARE_ILSPY, vendor ILSpy with "
         "`uare fetch-tool`, or put ilspycmd on PATH. "
-        "Install: `dotnet tool install -g ilspycmd`"
+        "Local install: `dotnet tool install ilspycmd --tool-path vendor/ilspy`"
     )
 
 

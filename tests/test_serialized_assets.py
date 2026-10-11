@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fixtures import (
     mono_script_body,
+    serialized_v17_objects,
     serialized_v22_objects,
     text_asset_body,
 )
@@ -29,6 +30,25 @@ class SerializedParseTests(unittest.TestCase):
         for info in sf.objects:
             self.assertGreaterEqual(info.byte_start, sf.data_offset)
             self.assertLessEqual(info.byte_start + info.byte_size, sf.file_size)
+
+    def test_parses_legacy_format_17_object_table(self) -> None:
+        blob = serialized_v17_objects("2018.4.36f1", [
+            (1, 49, text_asset_body("Config", b"a,b,c")),
+            (2, 28, text_asset_body("icon_coin", b"")),
+        ])
+        sf = parse_serialized_file(blob)
+        self.assertEqual(sf.format_version, 17)
+        self.assertEqual(sf.unity_version, "2018.4.36f1")
+        self.assertEqual([o.class_id(sf.types) for o in sf.objects], [49, 28])
+        for info in sf.objects:
+            self.assertGreaterEqual(info.byte_start, sf.data_offset)
+            self.assertLessEqual(info.byte_start + info.byte_size, sf.file_size)
+
+    def test_format_16_is_still_rejected(self) -> None:
+        blob = bytearray(serialized_v17_objects("5.6.7f1", [(1, 49, text_asset_body("X", b"y"))]))
+        struct.pack_into(">I", blob, 8, 16)  # version field -> 16
+        with self.assertRaisesRegex(UnityFormatError, "format >="):
+            parse_serialized_file(bytes(blob))
 
     def test_type_tree_file_is_rejected(self) -> None:
         blob = bytearray(serialized_v22_objects("2022.3.1f1", [(1, 49, text_asset_body("X", b"y"))]))
@@ -87,6 +107,15 @@ class AnalyzeAssetsTests(unittest.TestCase):
         by_class = {r["class_name"]: r for r in records}
         self.assertEqual(by_class["Texture2D"]["name"], "icon_coin")
         self.assertEqual(by_class["GameObject"]["name"], "")
+
+    def test_extracts_legacy_format_17_assets(self) -> None:
+        (self.data / "sharedassets0.assets").write_bytes(serialized_v17_objects("2018.4.36f1", [
+            (1, 49, text_asset_body("LegacyConfig", b"k=v\n")),
+        ]))
+        out = self.tmp / "out"
+        result = analyze_assets(self.data, out)
+        self.assertEqual(result.objects, 1)
+        self.assertEqual((out / "textassets/LegacyConfig").read_bytes(), b"k=v\n")
 
     def test_duplicate_names_do_not_overwrite(self) -> None:
         body = text_asset_body("Shared", b"one")

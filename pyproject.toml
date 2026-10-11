@@ -4,11 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unity-apk-re"
-version = "0.3.0"
+version = "0.7.0"
 description = "Pull Unity Android games over adb, extract APK sets, and report on Unity data, IL2CPP metadata and native libraries."
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
+
+[project.optional-dependencies]
+# Power mode: open AssetBundles, decode textures/audio/mesh, read MonoBehaviours with a type tree.
+power = ["UnityPy>=1.20", "Pillow>=10"]
 
 [project.scripts]
 uare = "uare.cli:main"

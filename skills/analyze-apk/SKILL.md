@@ -35,15 +35,17 @@ Lead with the facts that decide the next step:
 - **Engine check.** If analyze says "no Unity player data", the APK is not a Unity build. It lists the native libraries, for example `libcocos2dcpp.so` means Cocos2d-x. Stop there.
 - **Scripting backend.** `mono` means the managed DLLs are in `Data/Managed/*.dll` and can be decompiled with standard .NET tools. `il2cpp` means names come from `il2cpp/identifiers.tsv` (see `explore-il2cpp`), and method bodies live in `libil2cpp.so`.
 - **Packing verdict for `libil2cpp.so`.**
-  - `normal`: the binary is plain. Static tools (Il2CppDumper, Ghidra) can work on it.
-  - `likely_packed_or_encrypted`: the code is protected, and method bodies are not statically recoverable. Say so plainly.
+  - `normal`: the binary is plain. Static tools (Il2CppDumper, Ghidra) can work on it; offer `uare il2cpp-enrich` (RVAs + signatures + `dump.cs`) and `uare decompile` (Ghidra pseudo-C), and `uare export-assets --backend unitypy` for bundles/media.
+  - `likely_packed_or_encrypted`: the code is protected, and method bodies are not statically recoverable. Say so plainly. If the report names a `packer` (SecNeo, 360 Jiagu, ...), mention it: it tells the user which unpacker to reach for.
   - `inconclusive`: report the entropy figure and do not guess.
-- **IL2CPP metadata status.** `error` with "magic ... encrypted" means the metadata is protected. Report it the same way as a packed binary.
+- **IL2CPP metadata status.** `error` with "magic ... encrypted" means the metadata is protected. Report it the same way as a packed binary; if the user wants it opened, point them at `uare recover-metadata` (opt-in).
 - **Header errors.** Any count above 0 points to files the parser could not read. List a few paths from `files.jsonl`.
 
 ## Boundaries
 
-- This toolkit reads and reports. It never unpacks, decrypts, patches, re-signs or repackages a build. Do not attempt to bypass a packer, encrypted metadata, certificate pinning or anti-tamper checks, even when asked. Explain that the protection is the limit of static recon.
+- By default this toolkit reads and reports: it does not patch, re-sign or repackage a build, and it does not bypass a packer or encrypted metadata. It detects them and says so.
+- Two commands cross that line **only when the user explicitly asks**: `uare recover-metadata` (undoes a reversible `global-metadata.dat` wrapper via XOR/`--key`/`--cmd`) and `uare unpack-native` (names a recognised packer and runs a user-supplied `--cmd` unpacker). Run them only on the user's own app and only on request. Never run a `--cmd` the user did not supply.
+- Do not attempt to bypass certificate pinning or anti-tamper checks. That is outside static recon, and explain so.
 - Only pull from a device the user controls, and only apps installed on it.
 - Reports can contain third-party copyrighted names and strings. Keep them local; do not paste large dumps into chat.
 

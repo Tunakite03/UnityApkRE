@@ -1,5 +1,5 @@
 """Command line: uare {doctor,fetch-adb,devices,packages,pull,extract,analyze,run,summary,find,
-dump-il2cpp,export-assets}."""
+dump-il2cpp,il2cpp-enrich,decompile,fetch-tool,recover-metadata,unpack-native,export-assets}."""
 
 import argparse
 import json
@@ -16,9 +16,22 @@ from uare.adb import AdbClient, AdbConfig, pull_package, subprocess_runner
 from uare.analyze import analyze, load_report, resolve_layout, summarize
 from uare.apk import extract_apk_set
 from uare.assets import analyze_assets, summarize_assets
-from uare.errors import UareError
+from uare.elf import inspect_elf
+from uare.errors import ElfFormatError, UareError
+from uare.external import run_command
+from uare.ghidra import DEFAULT_VENDOR_ROOT as GHIDRA_VENDOR_ROOT
+from uare.ghidra import decompile, resolve_ghidra
+from uare.ghidra import summarize as summarize_ghidra
 from uare.il2cpp_dump import dump_definitions
+from uare.il2cpp_tools import DEFAULT_VENDOR_ROOT as DUMPER_VENDOR_ROOT
+from uare.il2cpp_tools import enrich, resolve_dumper
+from uare.il2cpp_tools import summarize as summarize_enrich
+from uare.packers import identify_file
+from uare.tool_fetch import fetch_archive
 from uare.outdir import staged_output
+from uare.package_tree import package
+from uare.package_tree import summarize as summarize_package
+from uare.recover import header_version, recover_file
 from uare.platform_tools import (
     DEFAULT_VENDOR_ROOT,
     PLATFORMS,
@@ -137,25 +150,135 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_dump_il2cpp(args: argparse.Namespace) -> int:
+def _key_bytes(value: str | None) -> bytes | None:
+    if value is None:
+        return None
+    try:
+        return bytes.fromhex(value)
+    except ValueError as exc:
+        raise UareError(f"--key must be hex bytes: {exc}") from exc
+
+
+def _metadata_path(args: argparse.Namespace) -> Path:
+    if getattr(args, "metadata", None):
+        return Path(args.metadata)
     layout = resolve_layout(Path(args.root))
-    metadata = layout.data_dir / "Managed" / "Metadata" / "global-metadata.dat"
+    return layout.data_dir / "Managed" / "Metadata" / "global-metadata.dat"
+
+
+def cmd_recover_metadata(args: argparse.Namespace) -> int:
+    metadata = _metadata_path(args)
+    if not metadata.is_file():
+        raise UareError(f"{metadata} not found; this build has no IL2CPP metadata (Mono or non-Unity?)")
+    result = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd)
+    version = header_version(result.data)
+    out_dir = Path(args.out)
+    with staged_output(out_dir) as staging:
+        (staging / "global-metadata.dat").write_bytes(result.data)
+        (staging / "recovery.json").write_text(
+            json.dumps({"source": str(metadata), "scheme": result.scheme, "version": version, "bytes": len(result.data)},
+                       indent=2), encoding="utf-8")
+    print(f"recovered {metadata} via {result.scheme} -> {out_dir / 'global-metadata.dat'} (v{version})")
+    return 0
+
+
+def cmd_dump_il2cpp(args: argparse.Namespace) -> int:
+    metadata = _metadata_path(args)
     if not metadata.is_file():
         raise UareError(f"{metadata} not found; this build has no IL2CPP metadata (Mono or non-Unity?)")
     out_dir = Path(args.out)
     with staged_output(out_dir) as staging:
-        result = dump_definitions(metadata, staging)
-    print(f"metadata v{result.version} -> {out_dir}")
+        source = metadata
+        if args.decrypt or args.key or args.cmd:
+            recovery = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd)
+            source = staging / "global-metadata.recovered.dat"
+            source.write_bytes(recovery.data)
+            print(f"metadata recovered via {recovery.scheme} -> {source.name}")
+        result = dump_definitions(source, staging)
+    print(f"metadata v{result.version} ({result.layout}) -> {out_dir}")
     for table in result.tables:
         suffix = f" ({table.unreadable} names unreadable)" if table.unreadable else ""
         print(f"  {table.name:<11}: {table.count}{suffix} -> {table.path}")
+    grouping = result.grouping
+    skipped = f", {grouping.ranges_skipped} ranges skipped" if grouping.ranges_skipped else ""
+    print(f"  {'members':<11}: {grouping.member_rows} rows under {grouping.types_grouped}/"
+          f"{grouping.types_total} types ({grouping.valid_fraction:.0%} clean{skipped}) -> members.tsv")
     print(result.note)
     return 0
 
 
 def cmd_export_assets(args: argparse.Namespace) -> int:
-    result = analyze_assets(Path(args.root), Path(args.out))
-    print("\n".join(summarize_assets(result)))
+    from uare import unitypy_backend
+
+    backend = args.backend
+    if backend == "auto":
+        backend = "unitypy" if unitypy_backend.available() else "stdlib"
+    if backend == "unitypy":
+        result = unitypy_backend.export_assets(Path(args.root), Path(args.out))
+        print("\n".join(unitypy_backend.summarize(result)))
+    else:
+        result = analyze_assets(Path(args.root), Path(args.out))
+        print("\n".join(summarize_assets(result)))
+    return 0
+
+
+def cmd_unpack_native(args: argparse.Namespace) -> int:
+    so = Path(args.so)
+    if not so.is_file():
+        raise UareError(f"{so} not found")
+    match = identify_file(so)
+    print(f"packer signature: {match.name} (marker {match.marker!r})" if match
+          else "packer signature: none recognised (this does not mean it is unpacked)")
+    if not args.cmd:
+        print("no --cmd given, so nothing was unpacked. Pass --cmd with a game-specific unpacker "
+              "(for example a Frida memory-dump script) that writes the clean .so to {output}.")
+        return 0
+    data = run_command(args.cmd, so.read_bytes())
+    name = Path(args.name).name if args.name else so.name
+    out_dir = Path(args.out)
+    with staged_output(out_dir) as staging:
+        target = staging / name
+        target.write_bytes(data)
+        try:
+            report = inspect_elf(target)
+        except ElfFormatError as exc:
+            raise UareError(f"unpacker output is not a readable ELF: {exc}") from exc
+        (staging / "elf_report.json").write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
+    packer = f", packer {report.packer}" if report.packer else ""
+    print(f"unpacked -> {out_dir / name}: {report.packing_verdict}, exec entropy {report.exec_entropy}{packer}")
+    if report.packing_verdict == "likely_packed_or_encrypted":
+        print("still packed: the unpacker did not yield a clean .text")
+        return 1
+    return 0
+
+
+def cmd_il2cpp_enrich(args: argparse.Namespace) -> int:
+    dumper = resolve_dumper(args.dumper, os.environ, DUMPER_VENDOR_ROOT, _path_lookup)
+    result = enrich(Path(args.root), Path(args.out), dumper,
+                    so=Path(args.so) if args.so else None,
+                    metadata=Path(args.metadata) if args.metadata else None, timeout=args.timeout)
+    print("\n".join(summarize_enrich(result)))
+    return 0
+
+
+def cmd_decompile(args: argparse.Namespace) -> int:
+    ghidra = resolve_ghidra(args.ghidra, os.environ, GHIDRA_VENDOR_ROOT, _path_lookup)
+    result = decompile(Path(args.so), Path(args.out), ghidra,
+                       decompile_functions=not args.no_decompile, timeout=args.timeout)
+    print("\n".join(summarize_ghidra(result)))
+    return 0
+
+
+def cmd_package(args: argparse.Namespace) -> int:
+    result = package(Path(args.root), Path(args.out))
+    print("\n".join(summarize_package(result)))
+    return 0
+
+
+def cmd_fetch_tool(args: argparse.Namespace) -> int:
+    record = fetch_archive(args.url, Path(args.dest), expected_sha256=args.sha256, name=args.name)
+    print(f"{record.name}: {len(record.files)} files, archive {record.archive_size} bytes, "
+          f"sha256 {record.archive_sha256} -> {args.dest}")
     return 0
 
 
@@ -230,11 +353,61 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("dump-il2cpp", help="categorised IL2CPP name tables (types, methods, fields, ...)")
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for the *.tsv name tables")
+    p.add_argument("--metadata", help="path to global-metadata.dat (default: under root)")
+    p.add_argument("--decrypt", action="store_true", help="recover encrypted/obfuscated metadata before dumping")
+    p.add_argument("--key", help="hex XOR key for metadata recovery")
+    p.add_argument("--cmd", help="external metadata decryptor ({input}/{output} placeholders, or stdout)")
     p.set_defaults(func=cmd_dump_il2cpp)
+
+    p = sub.add_parser("unpack-native", help="identify a native packer and optionally run an external unpacker")
+    p.add_argument("so", help="path to libil2cpp.so (or any native library)")
+    p.add_argument("--out", required=True, help="empty directory for the unpacked .so + elf_report.json")
+    p.add_argument("--cmd", help="external unpacker ({input}/{output} placeholders, or stdout)")
+    p.add_argument("--name", help="output file name (default: input file name)")
+    p.set_defaults(func=cmd_unpack_native)
+
+    p = sub.add_parser("il2cpp-enrich", help="run Il2CppDumper/Inspector for RVAs + signatures + dump.cs")
+    p.add_argument("root", help="extracted tree (needs lib/<abi>/libil2cpp.so + metadata)")
+    p.add_argument("--out", required=True, help="empty directory for methods_rva.tsv, dump.cs, ...")
+    p.add_argument("--dumper", help="dumper executable (default: UARE_IL2CPP_DUMPER, vendored, PATH)")
+    p.add_argument("--so", help="libil2cpp.so path (default: first under lib/<abi>/)")
+    p.add_argument("--metadata", help="global-metadata.dat path (default: under root)")
+    p.add_argument("--timeout", type=float, default=1800.0, help="dumper timeout (s)")
+    p.set_defaults(func=cmd_il2cpp_enrich)
+
+    p = sub.add_parser("decompile", help="Ghidra headless: function list + C decompilation of a .so")
+    p.add_argument("so", help="native library (e.g. an unpacked libil2cpp.so)")
+    p.add_argument("--out", required=True, help="empty directory for functions.tsv + decompiled/*.c")
+    p.add_argument("--ghidra", help="analyzeHeadless (default: UARE_GHIDRA, vendored, PATH)")
+    p.add_argument("--no-decompile", action="store_true", help="list functions only, skip C decompilation")
+    p.add_argument("--timeout", type=float, default=7200.0, help="Ghidra timeout (s)")
+    p.set_defaults(func=cmd_decompile)
+
+    p = sub.add_parser("package", help="RE layout: categorised assets + hierarchy + catalog + index")
+    p.add_argument("root", help="extracted tree or Unity Data directory")
+    p.add_argument("--out", required=True, help="empty directory for assets/, scripts/, scenes/, catalog.json ...")
+    p.set_defaults(func=cmd_package)
+
+    p = sub.add_parser("fetch-tool", help="download + unpack an external tool archive into vendor/")
+    p.add_argument("--url", required=True, help="archive URL (zip, or a single-file download)")
+    p.add_argument("--dest", required=True, help="destination directory, e.g. vendor/il2cpp-dumper")
+    p.add_argument("--sha256", help="expected sha256 of the archive")
+    p.add_argument("--name", help="label (default: destination name)")
+    p.set_defaults(func=cmd_fetch_tool)
+
+    p = sub.add_parser("recover-metadata", help="recover global-metadata.dat from a reversible wrapper")
+    p.add_argument("root", help="extracted tree or Unity Data directory")
+    p.add_argument("--out", required=True, help="empty directory for global-metadata.dat + recovery.json")
+    p.add_argument("--metadata", help="path to global-metadata.dat (default: under root)")
+    p.add_argument("--key", help="hex XOR key")
+    p.add_argument("--cmd", help="external decryptor ({input}/{output} placeholders, or stdout)")
+    p.set_defaults(func=cmd_recover_metadata)
 
     p = sub.add_parser("export-assets", help="object index + TextAsset bytes + MonoScript table")
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for objects.jsonl, textassets/, ...")
+    p.add_argument("--backend", choices=("auto", "stdlib", "unitypy"), default="auto",
+                   help="stdlib (no deps) or unitypy (bundles + textures/audio/mesh, needs uare[power])")
     p.set_defaults(func=cmd_export_assets)
 
     p = sub.add_parser("find", help="regex search IL2CPP identifiers (or string literals) of an analysis")

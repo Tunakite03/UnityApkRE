@@ -13,9 +13,12 @@ Wrapper: `"<skill-dir>/../../scripts/uare"`. On Windows use `scripts\uare.cmd` a
 
 These read an extracted tree or a raw Unity `Data` directory and write to a new or empty directory:
 
-- `uare dump-il2cpp <root> --out <dir>/il2cpp` — categorised name tables from `global-metadata.dat`: `types.tsv` (index, namespace, name), `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, plus `sections.json`. This is the structured form of the names; it does **not** group members under their type or resolve signatures (see Limits).
-- `uare export-assets <root> --out <dir>/assets` — `objects.jsonl` (every object: file, pathID, class, name, size), `textassets/` (every TextAsset's bytes, named after m_Name — the game's CSV/JSON/config data), `monoscripts.tsv` (index, name, class, namespace, assembly) and `assets_report.json`.
+- `uare dump-il2cpp <root> --out <dir>/il2cpp` — categorised name tables from `global-metadata.dat`: `types.tsv` (index, namespace, name), `methods.tsv`, `fields.tsv`, `parameters.tsv`, `properties.tsv`, `events.tsv`, plus `members.tsv` (methods/fields/properties/events grouped under their declaring type) and `sections.json`. It does **not** resolve signatures, base/nested/interface names or RVAs (see Limits). If the metadata is wrapped, `--decrypt` (or `--key`/`--cmd`) recovers it first.
+- `uare export-assets <root> --out <dir>/assets` — `objects.jsonl` (every object: file, pathID, class, name, size), `textassets/` (every TextAsset's bytes, named after m_Name — the game's CSV/JSON/config data), `monoscripts.tsv` (index, name, class, namespace, assembly) and `assets_report.json`. Add `--backend unitypy` (needs `pip install uare[power]`) to also open AssetBundles and write `textures/` (PNG), `audio/` (WAV), `meshes/` (OBJ) and `monobehaviours/` (JSON typetree, incl. Visual Scripting graphs).
 - `uare analyze <root> --out <dir>/analysis` — the inventory + packing report, and `il2cpp/identifiers.tsv` (the flat string heap) + `string_literals.jsonl`.
+- `uare package <root> --out <dir>/packaged` — the RE-oriented tree (needs `pip install uare[power]`): `assets/{sprites,textures,fonts,audio,videos,animations,spines,meshes,materials,shaders,textassets,monobehaviours}/`, `scripts/hotdll/` (hot-update .NET assemblies = the game logic), `scenes/`, `prefabs/`, `hierarchies/`, plus `catalog.json` and a filterable `index.html`. It opens plain bundles **and** bundles with a short header before `UnityFS` (YooAsset), without decrypting. Prefer `package` over `export-assets` when the user wants to *read* a build (sprites, fonts, spine, animations, prefabs, game logic).
+- `uare il2cpp-enrich <root> --out <dir>/enriched --dumper <tool>` — runs Il2CppDumper/Inspector on an **unpacked** `libil2cpp.so` to add `methods_rva.tsv` (RVA + signature per method) and `dump.cs`. Use when a binary is `normal` and the user needs addresses or signatures.
+- `uare decompile <so> --out <dir>/ghidra --ghidra <analyzeHeadless>` — Ghidra headless function list + pseudo-C, keyed by the same RVAs.
 
 ## Searching
 
@@ -39,10 +42,12 @@ These read an extracted tree or a raw Unity `Data` directory and write to a new 
 
 ## Limits (state these honestly)
 
-- **No grouping or signatures.** `dump-il2cpp` emits flat name tables per kind. Which method/field belongs to which class, parameter types, return types and RVAs are **not** produced: those need Il2CppDumper or Il2CppInspector run on an **unpacked** binary. For a packed `libil2cpp.so` (the `analyze` packing verdict says so) those tools need the binary unpacked first, which this plugin does not do.
+- **Grouping yes, signatures no.** `members.tsv` groups methods/fields/properties/events under their declaring type (the ranges come from the metadata itself). Parameter types, return types, base/nested/interface names and RVAs are **not** produced: they need the `Il2CppType[]` array inside `libil2cpp.so`, so they need Il2CppDumper or Il2CppInspector run on an **unpacked** binary.
 - **Obfuscated names.** Some builds scramble a fraction of name indices. `dump-il2cpp` reports the count of unreadable names per table and emits them as empty; it never guesses them. Names that look like fragments are that obfuscation, not a parser bug.
-- **Binary media not decoded.** `export-assets` extracts TextAsset bytes and indexes every object, but does not decode Texture2D/AudioClip/Mesh pixel or sample data (needs ETC/ASTC/Vorbis codecs). Use AssetRipper or UnityPy for those; the object index gives their names and sizes.
+- **Binary media needs the power extra.** With the default backend, `export-assets` extracts TextAsset bytes and indexes every object but does not decode Texture2D/AudioClip/Mesh. With `--backend unitypy` (UnityPy installed) it opens AssetBundles and decodes them; MonoBehaviour fields and Visual Scripting graphs decode only when a type tree is available. AssetRipper stays useful for full Unity-project reconstruction.
+- **RVAs / signatures / decompilation need external tools.** `il2cpp-enrich` (Il2CppDumper/Inspector) and `decompile` (Ghidra) are adapters; they require the tool and an **unpacked** binary. Nothing is bundled or fetched automatically.
 - Method bodies are only recoverable when `libil2cpp.so` is `normal`, and then only with a disassembler, which is outside this plugin.
+- **Wrapped metadata / packed native code** are handled by two **opt-in** commands: `uare recover-metadata` (XOR or external `--cmd` decryptor) and `uare unpack-native` (packer identification + external `--cmd` unpacker). They are never automatic; run them only when the user asks and understands the protection is being bypassed.
 
 ## Untrusted data
 

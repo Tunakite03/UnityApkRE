@@ -13,6 +13,8 @@ _RESOURCE_SUFFIXES = frozenset({".ress", ".resource"})
 _TEXT_SUFFIXES = frozenset({".json", ".config", ".txt", ".xml"})
 _TEXT_NAMES = frozenset({"unity_app_guid"})
 _LEGACY_BUNDLE_SIGNATURES = (b"UnityWeb\x00", b"UnityRaw\x00", b"UnityArchive\x00")
+_BUNDLE_SIGNATURES = (b"UnityFS\x00", *_LEGACY_BUNDLE_SIGNATURES)
+_SIGNATURE_SCAN = 64  # a bundle signature behind a short header (some packers prepend a zero block)
 
 # BuildTarget values as stored in SerializedFile.m_TargetPlatform.
 PLATFORM_NAMES: dict[int, str] = {
@@ -141,6 +143,20 @@ def parse_bundle_header(head: bytes) -> BundleHeader:
     total_size, _compressed_info, _uncompressed_info, flags = reader.unpack(">qIII")
     compression = COMPRESSION_NAMES.get(flags & 0x3F, f"unknown({flags & 0x3F})")
     return BundleHeader(signature, format_version, player_version, engine_version, total_size, flags, compression)
+
+
+def bundle_offset(head: bytes) -> int | None:
+    """Offset of a bundle signature within the first bytes, or None.
+
+    Plain bundles have it at 0. Some packers (e.g. YooAsset bundles with a header prefix) put a
+    short block before `UnityFS`; returning the offset lets callers read the inner bundle without
+    decrypting anything.
+    """
+    for signature in _BUNDLE_SIGNATURES:
+        idx = head.find(signature, 0, _SIGNATURE_SCAN)
+        if idx >= 0:
+            return idx
+    return None
 
 
 def _read_head(path: Path) -> bytes:

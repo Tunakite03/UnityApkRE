@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from uare.errors import ElfFormatError
+from uare.packers import identify as identify_packer
 
 PT_LOAD = 1
 PF_X, PF_W, PF_R = 1, 2, 4
@@ -24,6 +25,9 @@ PACKED_ENTROPY = 7.2
 NORMAL_ENTROPY = 7.0  # unpacked aarch64 code measures 5.7-6.95 (libmain, libunity 6000.2)
 HIGH_WINDOW_ENTROPY = 7.5
 FILL_WINDOW_ENTROPY = 1.0
+HIGH_WINDOW_FRACTION = 0.25  # share of high-entropy windows that already means "protected"
+FILL_FRACTION_PACKED = 0.5  # encrypted chunk plus this much filler is a packer signature
+FILL_FRACTION_HINT = 0.25  # below the packed bar, still corroborates a protected layout
 _MACHINES = {3: "x86", 40: "arm", 62: "x86_64", 183: "aarch64"}
 _ENTRY_SIZES = {2: (56, 64, 24), 1: (32, 40, 16)}  # class -> (phentsize, shentsize, symentsize)
 
@@ -61,6 +65,7 @@ class ElfReport:
     high_entropy_windows: int
     fill_windows: int
     packing_verdict: str  # normal | inconclusive | likely_packed_or_encrypted | no_exec_segment
+    packer: str | None  # name of a recognised packer, or None
 
 
 @dataclass(frozen=True)
@@ -204,12 +209,28 @@ def _window_stats(buf: "mmap.mmap | bytes", offset: int, size: int) -> _WindowSt
     return _WindowStats(total, windows, high, fill)
 
 
-def verdict(exec_entropy: float | None, windows: int, high_windows: int) -> str:
+def verdict(exec_entropy: float | None, windows: int, high_windows: int, fill_windows: int = 0,
+            section_table: str = "ok", defined_symbols: int = 0) -> str:
+    """Packing verdict from entropy plus structural corroboration.
+
+    Averages alone are weak (a filler region dilutes them), so the window mix is the primary
+    signal. Only in the ambiguous 7.0-7.2 band does structure decide: a broken section table or a
+    lot of filler leans packed, a clean section table with symbols and little filler leans normal.
+    When neither holds the answer stays `inconclusive` rather than guessing.
+    """
     if exec_entropy is None:
         return "no_exec_segment"
-    if exec_entropy >= PACKED_ENTROPY or (windows and high_windows / windows >= 0.25):
+    high_fraction = high_windows / windows if windows else 0.0
+    fill_fraction = fill_windows / windows if windows else 0.0
+    if exec_entropy >= PACKED_ENTROPY or high_fraction >= HIGH_WINDOW_FRACTION:
         return "likely_packed_or_encrypted"
+    if fill_fraction >= FILL_FRACTION_PACKED and high_fraction >= 0.05:
+        return "likely_packed_or_encrypted"  # an encrypted chunk wrapped in filler
     if exec_entropy <= NORMAL_ENTROPY:
+        return "normal"
+    if section_table == "out_of_bounds" or fill_fraction >= FILL_FRACTION_HINT:
+        return "likely_packed_or_encrypted"
+    if section_table == "ok" and defined_symbols >= 1 and fill_fraction < 0.1 and high_fraction < 0.1:
         return "normal"
     return "inconclusive"
 
@@ -225,6 +246,7 @@ def inspect_elf(path: Path) -> ElfReport:
             symbols = _symbols(buf, lay)
         except ElfFormatError as exc:
             raise ElfFormatError(f"{path}: {exc}") from exc
+        match = identify_packer(buf)
 
         segments: list[Segment] = []
         exec_counts: Counter[int] = Counter()
@@ -256,5 +278,6 @@ def inspect_elf(path: Path) -> ElfReport:
         exec_windows=windows,
         high_entropy_windows=high,
         fill_windows=fill,
-        packing_verdict=verdict(exec_entropy, windows, high),
+        packing_verdict=verdict(exec_entropy, windows, high, fill, symbols.section_table, symbols.defined or 0),
+        packer=match.name if match else None,
     )

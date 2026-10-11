@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fixtures import il2cpp_metadata_v31
+from fixtures import (
+    il2cpp_metadata_grouped,
+    il2cpp_metadata_v24_2,
+    il2cpp_metadata_v31,
+    il2cpp_metadata_v31_grouped,
+)
 from uare.errors import Il2CppMetadataError
 from uare.il2cpp_dump import dump_definitions
 
@@ -73,13 +78,109 @@ class DumpDefinitionsTests(unittest.TestCase):
         with self.assertRaisesRegex(Il2CppMetadataError, "encrypted"):
             dump_definitions(path, self.tmp / "out")
 
+    def test_groups_members_under_their_type(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(il2cpp_metadata_v31_grouped([
+            {"name": "ShopPage", "namespace": "Game.UI", "methods": [".ctor", "Buy"],
+             "fields": ["m_coins"], "events": ["OnGameEnd"], "properties": ["Coins"]},
+            {"name": "Player", "namespace": "Game", "methods": ["Update"],
+             "fields": ["m_hp", "m_mp"]},
+        ]))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+
+        self.assertEqual(result.grouping.types_total, 2)
+        self.assertEqual(result.grouping.types_grouped, 2)
+        self.assertEqual(result.grouping.member_rows, 8)
+        self.assertEqual(result.grouping.ranges_skipped, 0)
+        self.assertEqual(result.grouping.valid_fraction, 1.0)
+
+        rows = [line.split("\t") for line in (out / "members.tsv").read_text().splitlines()]
+        # (type_index, type_name, kind, member_index, member_name)
+        self.assertIn(["0", "ShopPage", "method", "1", "Buy"], rows)
+        self.assertIn(["0", "ShopPage", "field", "0", "m_coins"], rows)
+        self.assertIn(["0", "ShopPage", "event", "0", "OnGameEnd"], rows)
+        self.assertIn(["0", "ShopPage", "property", "0", "Coins"], rows)
+        self.assertIn(["1", "Player", "method", "2", "Update"], rows)
+        self.assertIn(["1", "Player", "field", "2", "m_mp"], rows)
+
+    def test_member_range_that_does_not_fit_is_skipped_not_guessed(self) -> None:
+        data = bytearray(il2cpp_metadata_v31_grouped([
+            {"name": "Good", "namespace": "", "methods": ["M"], "fields": ["F"]},
+        ]))
+        pairs = [struct.unpack_from("<II", data, 8 + i * 8) for i in range(31)]
+        types_off = pairs[19][0]
+        struct.pack_into("<i", data, types_off + 36, 5000)  # methodStart past the method table (v31)
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(bytes(data))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+
+        self.assertEqual(result.grouping.ranges_skipped, 1)
+        rows = (out / "members.tsv").read_text().splitlines()
+        self.assertEqual(rows, ["0\tGood\tfield\t0\tF"])
+        self.assertNotIn("\tmethod\t", "\n".join(rows))
+        self.assertIn("skipped", result.note)
+
     def test_unsupported_version_is_rejected(self) -> None:
         data = bytearray(il2cpp_metadata_v31(self._metadata()))
-        struct.pack_into("<i", data, 4, 24)  # version 24
+        struct.pack_into("<i", data, 4, 23)  # version 23 is below the supported floor
         path = self.tmp / "global-metadata.dat"
         path.write_bytes(bytes(data))
         (self.tmp / "out").mkdir()
-        with self.assertRaisesRegex(Il2CppMetadataError, r"v\(29, 30, 31\)"):
+        with self.assertRaisesRegex(Il2CppMetadataError, "supports metadata"):
+            dump_definitions(path, self.tmp / "out")
+
+    def test_v27_layout_groups_members(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(il2cpp_metadata_grouped(27, [
+            {"name": "ShopPage", "namespace": "Game.UI", "methods": [".ctor", "Buy"],
+             "fields": ["m_coins"], "events": ["OnGameEnd"]},
+            {"name": "Player", "namespace": "Game", "methods": ["Update"], "fields": ["m_hp", "m_mp"]},
+        ]))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+        self.assertEqual(result.layout, "v27")
+        self.assertEqual(result.grouping.member_rows, 7)
+        rows = [line.split("\t") for line in (out / "members.tsv").read_text().splitlines()]
+        self.assertIn(["1", "Player", "method", "2", "Update"], rows)
+
+    def test_v24_layout_groups_members(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(il2cpp_metadata_grouped(24, [
+            {"name": "ShopPage", "namespace": "Game.UI", "methods": [".ctor", "Buy"],
+             "fields": ["m_coins"]},
+        ]))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+        self.assertEqual(result.layout, "v24")
+        self.assertEqual(result.grouping.member_rows, 3)
+        rows = [line.split("\t") for line in (out / "members.tsv").read_text().splitlines()]
+        self.assertIn(["0", "ShopPage", "field", "0", "m_coins"], rows)
+
+    def test_v24_2_subversion_is_detected_by_header_size(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(il2cpp_metadata_v24_2([
+            {"name": "ShopPage", "namespace": "Game.UI", "methods": [".ctor", "Buy"], "fields": ["m_coins"]},
+        ]))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+        self.assertEqual(result.layout, "v24.2")
+        self.assertEqual(result.grouping.member_rows, 3)
+
+    def test_wrong_layout_for_version_raises_not_garbage(self) -> None:
+        # A v24 header (33 pairs) but v31 strides: the tables must fail validation, not emit names.
+        data = bytearray(il2cpp_metadata_grouped(24, [{"name": "X", "namespace": "", "methods": ["M"]}]))
+        struct.pack_into("<i", data, 4, 31)  # claim v31; the file is really v24
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(bytes(data))
+        (self.tmp / "out").mkdir()
+        with self.assertRaises(Il2CppMetadataError):
             dump_definitions(path, self.tmp / "out")
 
 

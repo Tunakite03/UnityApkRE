@@ -310,9 +310,10 @@ def summarize(report: dict[str, Any]) -> list[str]:
         if r is None:
             lines.append(f"lib {lib['abi']}/{lib['name']}: unreadable ({lib['error']})")
             continue
+        packer = f", packer {r['packer']}" if r.get("packer") else ""
         lines.append(
             f"lib {lib['abi']}/{lib['name']}: {r['size'] / 1e6:.1f} MB, exec entropy {r['exec_entropy']}, "
-            f"{r['packing_verdict']}, il2cpp exports {len(r['symbols']['il2cpp_exports'])}, "
+            f"{r['packing_verdict']}{packer}, il2cpp exports {len(r['symbols']['il2cpp_exports'])}, "
             f"section table {r['symbols']['section_table']}"
         )
     return lines

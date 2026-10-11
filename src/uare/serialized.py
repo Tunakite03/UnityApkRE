@@ -5,10 +5,12 @@ object table — for each object its class id and its [byteStart, byteStart+byte
 the data section. That is enough to locate and read individual assets (assets.py) without a type
 tree.
 
-Supported: format 22+ (Unity 2020.2+), type-tree-disabled player builds, little- or big-endian.
-Every parsed object range is validated against [data_offset, file_size]; a layout that does not
-fit raises UnityFormatError rather than returning garbage. Type trees (editor files) and formats
-below 22 are reported as unsupported for object parsing; header inspection still works via unity.py.
+Supported: formats 17-21 (Unity 2017.1-2020.1) and 22+ (Unity 2020.2+), type-tree-disabled player
+builds, little- or big-endian. The difference is the header tail (22+ carries 64-bit file size and
+data offset) and the object table's byteStart width (uint32 below 22, uint64 from 22). Every parsed
+object range is validated against [data_offset, file_size]; a layout that does not fit raises
+UnityFormatError rather than returning garbage. Type trees (editor files) and formats below 17 are
+reported as unsupported for object parsing; header inspection still works via unity.py.
 """
 
 import struct
@@ -17,7 +19,7 @@ from pathlib import Path
 
 from uare.errors import UnityFormatError
 
-_MIN_OBJECT_FORMAT = 22
+_MIN_OBJECT_FORMAT = 17
 _COMMON_TYPE_HASH = 16
 _SCRIPT_TYPE_HASH = 16
 
@@ -78,16 +80,26 @@ class _Cursor:
 
 
 def _read_header(data: bytes) -> tuple[int, str, int, int, int]:
-    """Return (format_version, endian, data_offset, file_size, cursor position after header)."""
-    if len(data) < 48:
+    """Return (format_version, endian, data_offset, file_size, cursor position after header).
+
+    Below format 22 the file size and data offset are 32-bit and the header ends right after the
+    endian byte; from 22 they are 64-bit and an 8-byte reserved block precedes the version string.
+    """
+    if len(data) < 20:
         raise UnityFormatError("file too small for a SerializedFile header")
-    _metadata_size, _legacy_size, version, _legacy_offset = struct.unpack_from(">IIII", data, 0)
+    _metadata_size, legacy_size, version, legacy_offset = struct.unpack_from(">IIII", data, 0)
     if version < _MIN_OBJECT_FORMAT:
         raise UnityFormatError(f"object parsing needs SerializedFile format >= {_MIN_OBJECT_FORMAT}, got {version}")
     endian_flag = data[16]
     endian = ">" if endian_flag else "<"
-    _metadata_size2, file_size, data_offset = struct.unpack_from(">IQQ", data, 20)
-    pos = 20 + 4 + 8 + 8 + 8  # reserved 8 bytes follow data_offset in v22+
+    if version >= 22:
+        if len(data) < 48:
+            raise UnityFormatError("file too small for a SerializedFile v22 header")
+        _metadata_size2, file_size, data_offset = struct.unpack_from(">IQQ", data, 20)
+        pos = 20 + 4 + 8 + 8 + 8  # reserved 8 bytes follow data_offset in v22+
+    else:
+        file_size, data_offset = legacy_size, legacy_offset
+        pos = 20
     return version, endian, data_offset, file_size, pos
 
 
@@ -128,7 +140,8 @@ def parse_serialized_file(data: bytes) -> SerializedFile:
     for _ in range(object_count):
         cursor.align()
         (path_id,) = cursor.unpack("q")
-        (byte_start,) = cursor.unpack("Q")
+        # byteStart is uint32 below format 22, uint64 from format 22 (64-bit file offsets).
+        (byte_start,) = cursor.unpack("Q" if version >= 22 else "I")
         (byte_size, type_index) = cursor.unpack("Ii")
         absolute = data_offset + byte_start
         if absolute < data_offset or absolute + byte_size > file_size:

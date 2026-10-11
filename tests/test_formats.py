@@ -151,6 +151,24 @@ class ElfTests(TempDirCase):
         with self.assertRaises(ElfFormatError):
             inspect_elf(self.write("bad.so", b"MZ" + b"\x00" * 100))
 
+    def test_ambiguous_entropy_band_uses_structure(self) -> None:
+        from uare.elf import verdict
+        # 7.0-7.2 with a clean table, symbols and no filler leans normal.
+        self.assertEqual(verdict(7.1, 10, 0, 0, "ok", 5), "normal")
+        # ... but a broken section table leans packed.
+        self.assertEqual(verdict(7.1, 10, 1, 0, "out_of_bounds", 5), "likely_packed_or_encrypted")
+        # ... and heavy filler leans packed.
+        self.assertEqual(verdict(7.1, 10, 1, 5, "ok", 5), "likely_packed_or_encrypted")
+        # No positive evidence either way stays inconclusive rather than guessing.
+        self.assertEqual(verdict(7.1, 10, 0, 0, "ok", 0), "inconclusive")
+        self.assertEqual(verdict(7.1, 10, 1, 1, "absent", 0), "inconclusive")
+
+    def test_encrypted_chunk_wrapped_in_filler_is_packed(self) -> None:
+        from uare.elf import verdict
+        # Low average entropy (6.9) but 60% filler windows and 10% high-entropy windows: the
+        # Rolling Hero shape, caught without relying on the average.
+        self.assertEqual(verdict(6.9, 100, 10, 60, "ok", 5), "likely_packed_or_encrypted")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,10 @@ _SECTION_PAIRS = 31  # enough for every supported version: we only read up to in
 _STRING_SECTION = 2
 _EVENTS_SECTION, _PROPERTIES_SECTION, _METHODS_SECTION = 3, 4, 5
 _PARAMETERS_SECTION, _FIELDS_SECTION, _TYPES_SECTION = 10, 11, 19
+_IMAGES_SECTION = 20
+# Il2CppImageDefinition: nameIndex, assemblyIndex, typeStart, typeCount, ... ; v24.1+ appends
+# customAttributeStart/Count (40 bytes), v24.0 does not (32 bytes).
+_IMAGE_STRIDES = (40, 32)
 _TYPE_NAMESPACE_OFFSET = 4  # Il2CppTypeDefinition: nameIndex@0, namespaceIndex@4
 _VALIDATION_SAMPLE = 4000
 _MAX_IDENTIFIER = 1024  # a managed identifier longer than this is treated as not-a-name
@@ -268,6 +272,36 @@ def _group_members(data: bytes, heap: bytes, pairs: list[tuple[int, int]], layou
                           ranges_skipped=skipped, valid_fraction=fraction)
 
 
+def _emit_images(data: bytes, heap: bytes, pairs: list[tuple[int, int]], types_total: int,
+                 out_path: Path) -> int | None:
+    """Write images.tsv (index, assembly, type_start, type_count). Returns the image count, or None
+    when no stride yields image ranges that tile the type table exactly (layout not recognised)."""
+    offset, size = pairs[_IMAGES_SECTION]
+    if offset + size > len(data):
+        return None
+    for stride in _IMAGE_STRIDES:
+        if size == 0 or size % stride:
+            continue
+        records = []
+        for i in range(size // stride):
+            name_idx, _assembly, start, count = struct.unpack_from("<iiii", data, offset + i * stride)
+            records.append((_string_at(heap, name_idx), start, count))
+        expected = 0
+        tiles = True
+        for name, start, count in records:
+            if name is None or start != expected or count < 0:
+                tiles = False
+                break
+            expected += count
+        if not tiles or expected != types_total:
+            continue
+        with out_path.open("w", encoding="utf-8") as handle:
+            for i, (name, start, count) in enumerate(records):
+                handle.write(f"{i}\t{name}\t{start}\t{count}\n")
+        return len(records)
+    return None
+
+
 def dump_definitions(metadata_path: Path, out_dir: Path) -> DumpResult:
     """Write one name table per definition section into out_dir. out_dir must already exist."""
     data = metadata_path.read_bytes()
@@ -313,11 +347,19 @@ def dump_definitions(metadata_path: Path, out_dir: Path) -> DumpResult:
           members=grouping.member_rows, skipped=grouping.ranges_skipped,
           valid_fraction=round(grouping.valid_fraction, 3))
 
+    images = _emit_images(data, heap, pairs, grouping.types_total, out_dir / "images.tsv")
+    if images is None:
+        event(LOG, logging.WARNING, "il2cpp_images_unrecognised", version=version, layout=layout.name)
+    else:
+        event(LOG, logging.INFO, "il2cpp_images", images=images)
+
     note = (
         f"Member grouping is in members.tsv (type, kind, member), using the {layout.name} layout. "
         "Signatures, base/nested/interface names and RVAs need the Il2CppType[] array in libil2cpp.so, "
         "so they require Il2CppDumper/Il2CppInspector on an unpacked binary."
     )
+    if images is None:
+        note += " The image (assembly) table did not validate, so images.tsv was not written."
     if total_unreadable:
         note += (f" {total_unreadable} names were unreadable (obfuscated or blob entries) and emitted as empty; "
                  f"this build scrambles some name indices.")

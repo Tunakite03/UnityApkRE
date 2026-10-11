@@ -1,7 +1,7 @@
 {
   "name": "unity-apk-re",
   "version": "0.7.0",
-  "description": "AI agent guidance plugin for reverse engineering and rebuilding Unity Android games. Guides the agent through an interactive workflow: pull APK, extract assets, analyze, report findings to user, then rebuild into an openable Unity project based on user decisions.",
+  "description": "Evidence-backed Unity game reconstruction: scenes, hierarchy, prefab provenance, assets, animations, script and service analysis, structural drafts and explicit validation gaps.",
   "author": {
     "name": "tunakite03"
   },

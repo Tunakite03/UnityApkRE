@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "unity-apk-re"
 version = "0.7.0"
-description = "Pull Unity Android games over adb, extract APK sets, and report on Unity data, IL2CPP metadata and native libraries."
+description = "Build evidence-backed Unity game reconstruction blueprints from scenes, assets, code metadata and dependencies."
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []

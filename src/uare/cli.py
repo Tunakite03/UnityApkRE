@@ -157,6 +157,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("\n".join(summarize(asdict(report))))
         result = run.stage("package", lambda: package(extract_dir, assets_dir))
         print("\n".join(summarize_package(result)))
+        from uare.blueprint import blueprint
+        reconstructed = run.stage("blueprint", lambda: blueprint(workdir, workdir / "blueprint"))
+        print(json.dumps(asdict(reconstructed), indent=2))
     finally:
         # Written on success and on failure: a failed run still says which stage stopped it.
         if workdir.is_dir():
@@ -307,6 +310,13 @@ def cmd_decompile(args: argparse.Namespace) -> int:
     result = decompile(Path(args.so), Path(args.out), ghidra,
                        decompile_functions=not args.no_decompile, timeout=args.timeout)
     print("\n".join(summarize_ghidra(result)))
+    return 0
+
+
+def cmd_blueprint(args: argparse.Namespace) -> int:
+    from uare.blueprint import blueprint
+    result = blueprint(Path(args.workdir), Path(args.out))
+    print(json.dumps(asdict(result), indent=2))
     return 0
 
 
@@ -464,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, help="empty directory for report.json and detail files")
     p.set_defaults(func=cmd_analyze)
 
-    p = sub.add_parser("run", help="pull + extract + analyze + full asset export (needs UnityPy) into one work directory")
+    p = sub.add_parser("run", help="pull + extract + analyze + package + reconstruction blueprint (needs UnityPy)")
     _add_adb_options(p)
     p.add_argument("package")
     p.add_argument("--workdir", required=True, help="directory that will hold pull/, extracted/, analysis/")
@@ -514,7 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=7200.0, help="Ghidra timeout (s)")
     p.set_defaults(func=cmd_decompile)
 
-    p = sub.add_parser("package", help="full asset export (needs UnityPy): assets by category and bundle, prefabs, catalog")
+    p = sub.add_parser("package", help="capture scoped game model and export media, hierarchy and raw catalog (needs UnityPy)")
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for assets/, scripts/, scenes/, catalog.json ...")
     p.set_defaults(func=cmd_package)
@@ -541,7 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stdlib (no deps) or unitypy (bundles + textures/audio/mesh, needs uare[power])")
     p.set_defaults(func=cmd_export_assets)
 
-    p = sub.add_parser("rebuild", help="create a Unity project from a completed uare run workdir")
+    p = sub.add_parser("blueprint", help="scene, asset, animation and dependency evidence for reconstruction")
+    p.add_argument("workdir", help="work directory containing extracted-assets/game_model.json")
+    p.add_argument("--out", required=True, help="empty directory for the report, browser and scope manifests")
+    p.set_defaults(func=cmd_blueprint)
+
+    p = sub.add_parser("rebuild", help="create a structural Unity draft and report all unresolved reconstruction bindings")
     p.add_argument("workdir", help="directory from a prior `uare run` (with analysis/, extracted-assets/, ...)")
     p.add_argument("--out", required=True, help="empty directory for the Unity project")
     p.set_defaults(func=cmd_rebuild)

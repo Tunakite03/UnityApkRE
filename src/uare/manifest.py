@@ -32,7 +32,7 @@ from uare import __version__
 
 SCHEMA = "uare.run-manifest"
 SCHEMA_VERSION = 1
-STAGE_NAMES = ("pull", "extract", "analyze", "package")
+STAGE_NAMES = ("pull", "extract", "analyze", "package", "blueprint")
 MANIFEST_NAME = "manifest.json"
 
 T = TypeVar("T")
@@ -150,7 +150,7 @@ def _status(stages: list[StageRecord], assets: dict[str, Any] | None) -> tuple[s
         return "partial", f"{assets['errors']} file(s) could not be opened"
     if assets.get("skipped"):
         return "partial", f"{assets['skipped']} object(s) produced no output; see the catalog notes"
-    return "complete", "every stage ran and every readable object was exported"
+    return "complete", "analysis pipeline completed; this does not establish reconstruction or gameplay completeness"
 
 
 def _limitations(coverage: dict[str, Any], assets: dict[str, Any] | None) -> list[str]:
@@ -211,6 +211,9 @@ def build_manifest(workdir: Path, run: RunLog) -> dict[str, Any]:
     }
 
     artifacts = [
+        _artifact(workdir, "game_model", "extracted-assets/game_model.json"),
+        _artifact(workdir, "blueprint_report", "blueprint/report.json"),
+        _artifact(workdir, "blueprint_browser", "blueprint/index.html"),
         _artifact(workdir, "pull_manifest", "pull/manifest.json"),
         _artifact(workdir, "extraction", "extracted/extraction.json"),
         _artifact(workdir, "analysis_report", "analysis/report.json"),

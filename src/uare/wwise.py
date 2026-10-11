@@ -163,7 +163,7 @@ def extract_all(source_dir: Path, out_dir: Path) -> WwiseResult:
             except (WwiseFormatError, OSError) as exc:
                 failed += 1
                 banks.append(BankResult(str(bnk), 0, 0, 0, 0, (), str(exc)))
-                event(LOG, logging.WARNING, "bank_failed", name=bank_name, error=str(exc))
+                event(LOG, logging.WARNING, "bank_failed", bank=bank_name, error=str(exc))
 
         (staging / "wwise_report.json").write_text(
             json.dumps({"banks_found": len(bnk_files), "banks_extracted": extracted,

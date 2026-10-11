@@ -1,9 +1,9 @@
-"""Orchestrate a full Unity project rebuild from a completed ``uare run`` workdir.
+"""Generate a structural Unity draft from an evidence-backed game model.
 
 This is the P0 module that ties all reconstruction steps together. Given a work
 directory that contains the outputs of ``uare run`` (and optionally ``dump-il2cpp``,
-``il2cpp-enrich``, ``decompile``, etc.), it creates a Unity project directory that
-can be opened in the Unity Editor.
+``il2cpp-enrich``, ``decompile``, etc.), it creates a draft project with explicit
+reconstruction blockers. Unity import, compilation and gameplay are unverified.
 
 The output has the standard Unity project layout::
 
@@ -30,6 +30,7 @@ The output has the standard Unity project layout::
 
 import json
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,12 +38,15 @@ from pathlib import Path
 from uare.errors import UareError
 from uare.logs import event
 from uare.outdir import staged_output
+from uare.game_model import ModelError, load_model, read_json, record, string, write_json
+from uare.blueprint import write_blueprint
+from uare.project_export import Binding, export_project
+from uare.asset_import import guid_for
 
 LOG = logging.getLogger("uare.rebuild")
 
 _PROJECT_VERSION = """\
 m_EditorVersion: {version}
-m_EditorVersionWithRevision: {version} (000000000000)
 """
 
 _MINIMAL_PROJECT_SETTINGS = """\
@@ -60,15 +64,6 @@ PlayerSettings:
   companyName: Recovered
   enableNativePlatformBackendsForNewInputSystem: 1
 """
-
-_PACKAGES_MANIFEST = """\
-{
-  "dependencies": {
-    "com.unity.ugui": "1.0.0"
-  }
-}
-"""
-
 
 @dataclass(frozen=True)
 class RebuildResult:
@@ -136,11 +131,18 @@ def _load_report(workdir: Path) -> dict:
     return json.loads(report_path.read_text(encoding="utf-8"))
 
 
+_CHINA_RELEASE = re.compile(r"^(\d+\.\d+\.\d+)f\d+c\d+$")
+
+
 def _detect_unity_version(report: dict) -> str:
     versions = report.get("inventory", {}).get("unity_versions", {})
     if versions:
-        return max(versions, key=versions.get)
-    return "2021.3.0f1"
+        version = max(versions, key=versions.get)
+        m = _CHINA_RELEASE.match(version)
+        if m:
+            version = f"{m.group(1)}f1"
+        return version
+    raise ModelError("Cannot choose a Unity Editor version: analysis contains no detected version")
 
 
 def _write_project_settings(project: Path, unity_version: str) -> None:
@@ -152,10 +154,23 @@ def _write_project_settings(project: Path, unity_version: str) -> None:
         _MINIMAL_PROJECT_SETTINGS, encoding="utf-8")
 
 
-def _write_packages(project: Path) -> None:
+def _write_packages(project: Path, workdir: Path, warnings: list[str]) -> None:
     packages_dir = project / "Packages"
     packages_dir.mkdir(parents=True, exist_ok=True)
-    (packages_dir / "manifest.json").write_text(_PACKAGES_MANIFEST, encoding="utf-8")
+    selection = workdir / "rebuild-packages.json"
+    dependencies: dict[str, str] = {}
+    if selection.is_file():
+        selected = record(read_json(selection).get("dependencies"), "rebuild package dependencies")
+        for name, version in selected.items():
+            if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", name):
+                raise ModelError("Invalid rebuild package identifier")
+            value = string(version, "package version")
+            if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", value):
+                raise ModelError(f"Rebuild package requires an explicit registry version; package={name}")
+            dependencies[name] = value
+    else:
+        warnings.append("Package versions are unverified; no dependencies guessed. Supply rebuild-packages.json with explicit versions.")
+    write_json(packages_dir / "manifest.json", {"dependencies": dependencies})
 
 
 def _copy_extracted_assets(assets_dir: Path, project: Path) -> dict[str, int]:
@@ -165,15 +180,28 @@ def _copy_extracted_assets(assets_dir: Path, project: Path) -> dict[str, int]:
         src = assets_dir / "assets" / category
         if src.is_dir():
             target = project / target_rel
-            count = _copy_tree(src, target)
+            count = 0
+            for item in sorted(src.rglob("*")):
+                if not item.is_file() or item.suffix.lower() == ".json":
+                    continue
+                destination = target / item.relative_to(src)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+                count += 1
             counts[category] = count
     other_src = assets_dir / "assets"
     if other_src.is_dir():
         known_categories = set(_CATEGORY_DIRS.keys())
         for sub in sorted(other_src.iterdir()):
-            if sub.is_dir() and sub.name not in known_categories:
+            if sub.is_dir() and sub.name not in known_categories and sub.name in {"sprites", "textassets", "spines"}:
                 target = project / "Assets" / "Resources" / sub.name
-                count = _copy_tree(sub, target)
+                count = 0
+                for item in sorted(sub.rglob("*")):
+                    if item.is_file() and item.suffix != ".json":
+                        destination = target / item.relative_to(sub)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(item, destination)
+                        count += 1
                 counts.setdefault("other", 0)
                 counts["other"] = counts.get("other", 0) + count
     return counts
@@ -242,8 +270,9 @@ def _run_il2cpp_merge(workdir: Path, project: Path, warnings: list[str]) -> int:
     ghidra_dir = workdir / "ghidra" if (workdir / "ghidra").is_dir() else None
     try:
         from uare.il2cpp_merge import merge
-        scripts_dir = project / "Assets" / "Scripts" / "IL2CPP"
+        scripts_dir = project / "Reconstruction" / "CodeEvidence" / "IL2CPP"
         result = merge(il2cpp_dir, enrich_dir, ghidra_dir, scripts_dir)
+        warnings.append("IL2CPP annotations are code evidence under Reconstruction/, not recovered executable scripts.")
         event(LOG, logging.INFO, "il2cpp_merged", types=result.types, methods=result.methods_total)
         return result.files_written
     except Exception as exc:
@@ -256,6 +285,8 @@ def _run_shader_recovery(assets_dir: Path, project: Path, warnings: list[str]) -
         from uare.shader_recover import recover_shaders
         shaders_dir = project / "Assets" / "Shaders"
         result = recover_shaders(assets_dir, shaders_dir)
+        if result.failed:
+            warnings.append(f"{result.failed} shader recoveries failed; inspect shader recovery evidence")
         event(LOG, logging.INFO, "shaders_recovered_rebuild",
               original=result.recovered_original, reconstructed=result.recovered_parsed)
         return result.recovered_original + result.recovered_parsed
@@ -315,14 +346,22 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
 
     extracted_dir = workdir / "extracted"
     assets_dir = workdir / "extracted-assets"
+    model_path = assets_dir / "game_model.json"
+    if not model_path.is_file():
+        raise ModelError("Rebuild requires a game model with scoped identities; rerun `uare package` using this version")
+    model = load_model(model_path)
     warnings: list[str] = []
+    if unity_version not in report.get("inventory", {}).get("unity_versions", {}):
+        warnings.append("Selected Editor version normalizes a regional release; compatibility has not been verified.")
     steps: list[str] = []
 
     with staged_output(out_dir) as project:
+        write_blueprint(workdir, project / "Reconstruction" / "Blueprint", model)
+        steps.append("reconstruction_blueprint")
         _write_project_settings(project, unity_version)
         steps.append("project_settings")
 
-        _write_packages(project)
+        _write_packages(project, workdir, warnings)
         steps.append("packages_manifest")
 
         asset_counts: dict[str, int] = {}
@@ -332,10 +371,6 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
         elif extracted_dir.is_dir():
             warnings.append("No extracted-assets/ directory; run `uare package` for full asset export")
 
-        scenes_copied = _copy_scenes(assets_dir, project)
-        if scenes_copied:
-            steps.append("copy_scenes")
-
         native_count = 0
         if extracted_dir.is_dir():
             native_count = _copy_native_plugins(extracted_dir, project)
@@ -344,20 +379,36 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
             _copy_streaming_assets(extracted_dir, project)
 
         scripts = 0
+        code_evidence_files = 0
         if backend == "mono":
             scripts = _run_mono_decompile(extracted_dir, project, warnings)
             if scripts:
                 steps.append("mono_decompile")
         elif backend == "il2cpp":
-            scripts = _run_il2cpp_merge(workdir, project, warnings)
-            if scripts:
+            code_evidence_files = _run_il2cpp_merge(workdir, project, warnings)
+            if code_evidence_files:
                 steps.append("il2cpp_merge")
 
         shaders = _run_shader_recovery(assets_dir, project, warnings)
         if shaders:
             steps.append("shader_recovery")
 
-        scenes_conv, prefabs_conv = _run_scene_convert(assets_dir, project, warnings)
+        media_bindings: dict[str, Binding] = {}
+        for obj in model.objects:
+            if not obj.output or obj.class_name not in {"Texture2D", "AudioClip"}:
+                continue
+            parts = Path(obj.output).parts
+            if len(parts) < 3 or parts[0] != "assets" or parts[1] not in _CATEGORY_DIRS:
+                continue
+            asset_path = Path(_CATEGORY_DIRS[parts[1]]) / Path(*parts[2:])
+            if (project / asset_path).is_file():
+                file_id = 2800000 if obj.class_name == "Texture2D" else 8300000
+                relative = asset_path.relative_to("Assets").as_posix()
+                media_bindings[obj.id] = Binding(asset_path.as_posix(), file_id, guid_for(relative), 3)
+        exported = export_project(model, project, media_bindings)
+        scenes_conv, prefabs_conv = exported.scenes, exported.prefabs
+        if exported.blockers:
+            warnings.append(f"{len(exported.blockers)} reconstruction blockers; see Reconstruction/export_blockers.json")
         if scenes_conv or prefabs_conv:
             steps.append("scene_convert")
 
@@ -370,11 +421,16 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
             steps.append("meta_generation")
 
         rebuild_report = {
+            "status": "structural_draft",
+            "validation": {"unity_import": "not_tested", "compilation": "not_tested", "play_mode": "not_tested"},
+            "blueprint": "Reconstruction/Blueprint/index.html",
+            "reconstruction_blockers": len(exported.blockers),
             "unity_version": unity_version,
             "scripting_backend": backend,
             "steps": steps,
             "assets": asset_counts,
             "scripts": scripts,
+            "code_evidence_files": code_evidence_files,
             "shaders": shaders,
             "scenes_converted": scenes_conv,
             "prefabs_converted": prefabs_conv,
@@ -409,6 +465,7 @@ def rebuild(workdir: Path, out_dir: Path) -> RebuildResult:
 
 def summarize(result: RebuildResult) -> list[str]:
     lines = [
+        "status            : structural draft; Unity import, compilation and Play Mode not tested",
         f"unity version     : {result.unity_version}",
         f"scripting backend : {result.scripting_backend}",
         f"project dir       : {result.project_dir}",

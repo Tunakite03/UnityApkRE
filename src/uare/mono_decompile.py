@@ -160,11 +160,11 @@ def decompile_all(managed_dir: Path, out_dir: Path, decompiler: str, *,
                 results.append(AssemblyResult(stem, str(dll), count, None))
                 decompiled += 1
                 total_cs += count
-                event(LOG, logging.INFO, "assembly_decompiled", name=stem, files=count)
+                event(LOG, logging.INFO, "assembly_decompiled", assembly=stem, files=count)
             except DecompilerError as exc:
                 results.append(AssemblyResult(stem, str(dll), 0, str(exc)))
                 errors += 1
-                event(LOG, logging.WARNING, "assembly_decompile_failed", name=stem, error=str(exc))
+                event(LOG, logging.WARNING, "assembly_decompile_failed", assembly=stem, error=str(exc))
     return MonoDecompileResult(
         decompiler=decompiler, managed_dir=str(managed_dir), total_dlls=len(dlls),
         decompiled=decompiled, skipped_system=skipped_system, skipped_unity=skipped_unity,

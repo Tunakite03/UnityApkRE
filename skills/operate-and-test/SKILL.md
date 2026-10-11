@@ -56,7 +56,7 @@ These checks read files that already exist. They do not run the pipeline.
 - `manifest.json` `outputs[].sha256`: recompute the hash of each listed file and compare. A mismatch means the file changed after the run.
 
 - `report.json` in the analysis directory: `scripts/uare summary <workdir>/analysis` prints the summary.
-- `extracted-assets/report.json`: `errors` must be an empty list (or only per-file entries the user already knows about).
+- `extracted-assets/report.json`: `errors` is an integer count; investigate every nonzero count.
 - `extracted-assets/catalog.json`: every entry needs an `output` or a `note`. An entry with neither is a bug.
 - Each `output` path in the catalog exists on disk. No two objects share one output (components and monoscripts are the only shared outputs, by design).
 - `categories` in `report.json` counts the files written. `in_hierarchy` counts the components stored inside prefab and scene JSON.
@@ -71,7 +71,7 @@ catalog = json.load(open(os.path.join(root, "catalog.json")))
 claimed = collections.defaultdict(set)
 for entry in catalog:
     if entry["output"] and entry["category"] not in ("components", "monoscripts"):
-        claimed[entry["output"]].add((entry["source"], entry["path_id"]))
+        claimed[entry["output"]].add((entry["source"], entry["serialized_file"], entry["path_id"]))
     assert entry["output"] or entry["note"], entry
     if entry["output"]:
         assert os.path.exists(os.path.join(root, entry["output"])), entry["output"]
@@ -97,3 +97,12 @@ The path in quotes is the first argument; replace `<workdir>` with the work dire
 - Never reuse a work directory. Pick a new name and say which one you used.
 - Do not decrypt, patch or re-sign anything. Hot-update assemblies stay as stored; the toolkit does not decrypt them.
 - Report exactly what the command printed, including errors. Do not claim a check passed unless you ran it.
+
+## Reconstruction verification
+
+The run has five stages, ending in `blueprint`. Pipeline `complete` does not mean
+a complete game. Inspect `blueprint/report.json` coverage and missing references,
+then use `blueprint/index.html` to follow hierarchy, script/animation bindings and
+asset usage. Rebuild results are structural drafts. Check
+`Reconstruction/export_blockers.json` and record Unity import, compilation and
+Play Mode separately. Do not mark any of them passed merely because YAML exists.

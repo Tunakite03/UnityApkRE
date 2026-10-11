@@ -1,25 +1,31 @@
 # unity-apk-re
 
-AI agent guidance plugin for reverse engineering and rebuilding Unity Android games.
+Evidence-backed reverse engineering of Unity Android games for project reconstruction.
 
-This is a Claude Code plugin that **guides** the AI agent through the complete workflow -- from pulling an APK off a phone to producing an openable Unity project. The plugin provides step-by-step instructions, decision checkpoints, and reference documentation. It does not do everything automatically: the agent follows the guidance, uses the bundled CLI tools for binary parsing, and asks the user for decisions at key points.
+The main output is a navigable game blueprint: scenes and hierarchy, confirmed prefab
+provenance, direct/transitive asset usage, animation data, script bindings, SDK evidence,
+and concrete gaps. Asset exports support that model. `rebuild` creates a structural draft
+and reports unresolved bindings; it does not claim a complete playable game.
 
-Requirements: Python 3.10+, standard library only. adb is bundled for macOS, Linux and Windows.
-
-> Vietnamese step-by-step guide: [docs/huong-dan.md](docs/huong-dan.md)
+Python 3.10+ is required. Binary packaging uses the project-local `power` extra;
+blueprint generation uses the standard library. adb is bundled for supported platforms.
 
 ## How it works
 
-When the user says something like **"Rebuild game with package:com.example.game"**, the agent follows this interactive workflow:
-
+```text
+pull → extract → analyze → package → blueprint
+                            │           ↑
+                            │     code analysis + runtime evidence
+                            ↓
+                         rebuild → Unity import / compilation / gameplay validation
 ```
-Phase 1: ACQUIRE       Pull APK from device via adb
-Phase 2: EXTRACT & RE  Extract assets, analyze, reverse engineer
-Phase 3: CHECKPOINT    Report findings to user, ASK about rebuild scope
-Phase 4: REBUILD       Create Unity project based on user's answers
-```
 
-The **checkpoint** is the key design choice: after extraction and analysis, the agent reports what it found (Unity version, scripting backend, asset inventory, protections) and asks the user how they want to rebuild (local-only, with backend stubs, or full reconstruction). Only after the user answers does the agent proceed.
+The plugin guides the agent to investigate behavior with source citations, not infer
+rules from class names. Unknown versions, missing references, remote content and
+unverified gameplay remain explicit. Authorized work proceeds without a mandatory
+repeated scope checkpoint.
+
+See [the reconstruction architecture](docs/redesign.md) for data contracts and limits.
 
 ## Quick start
 
@@ -27,11 +33,26 @@ The **checkpoint** is the key design choice: after extraction and analysis, the 
 git clone <this repo> unity-apk-re && cd unity-apk-re
 scripts/uare doctor                                   # which adb, its version, connected devices
 scripts/uare packages --filter hero                   # find the package id
-scripts/uare run com.example.game --workdir re/game   # pull + extract + analyze + full asset export
-scripts/uare find re/game/analysis '(?i)shop' --context 6
+scripts/uare run com.example.game --workdir re/game   # includes the reconstruction blueprint
+scripts/uare blueprint re/game --out re/game/blueprint-review
+scripts/uare rebuild re/game --out re/game/project-draft
 ```
 
 On Windows, use `scripts\uare.cmd`.
+
+Open `re/game/blueprint/index.html` directly in a browser; it needs no server.
+Select a scene, inspect hierarchy/components, follow references and reverse usage,
+and review animation objects and missing evidence. `overview.md` is the compact entry
+point and `report.json` / `scopes/*.json` are machine-readable.
+
+Existing category-only exports must be repackaged with this version: their path IDs
+cannot safely distinguish objects in different serialized files. Use a fresh output
+workdir; never overwrite earlier results.
+
+The default rebuild manifest has no guessed package versions. Explicit reconstruction
+choices can be provided in `<workdir>/rebuild-packages.json` under `dependencies`.
+Behavior analysis and observations use the contracts in the rebuild skill and
+[architecture document](docs/redesign.md).
 
 ## As a Claude Code plugin
 
@@ -44,7 +65,7 @@ On Windows, use `scripts\uare.cmd`.
 
 | Skill | What it guides |
 |---|---|
-| `/unity-apk-re:rebuild-game` | **Main workflow** -- the full interactive pipeline from APK to Unity project, with user checkpoint |
+| `/unity-apk-re:rebuild-game` | **Main workflow** -- structural evidence, behavior analysis, reconstruction and verification |
 | `/unity-apk-re:analyze-apk` | Extraction and analysis pipeline, from a phone or local files |
 | `/unity-apk-re:pull-from-device` | Pulling APK splits and OBBs, fixing device states |
 | `/unity-apk-re:explore-il2cpp` | Searching IL2CPP names and string literals, reading report.json |
@@ -52,10 +73,10 @@ On Windows, use `scripts\uare.cmd`.
 
 ### Reference documents
 
-The `rebuild-game` skill includes reference docs the agent uses during each phase:
+The `rebuild-game` skill includes reference docs the agent uses during reconstruction:
 
 - `references/unity-project-structure.md` -- exact folder layout for a Unity project
-- `references/rebuild-questions.md` -- decision matrix: what to ask and how to interpret answers
+- `references/rebuild-questions.md` -- evidence and input decisions
 - `references/scripting-backend.md` -- Mono vs IL2CPP rebuild strategies and SDK detection
 
 ## CLI tools
@@ -68,12 +89,13 @@ The `uare` CLI handles binary format parsing and tasks that agents cannot do nat
 | `pull <package> --out DIR` | Pull all APK splits and OBBs from a device |
 | `extract <archives> --out DIR` | Merge APK splits into one tree |
 | `analyze <root> --out DIR` | Report on Unity version, scripting backend, IL2CPP metadata, packing |
-| `run <package> --workdir DIR` | Pull + extract + analyze + full asset export (one shot) |
+| `run <package> --workdir DIR` | Pull + extract + analyze + package + blueprint |
 | `plan <package> --workdir DIR` | Dry run: list steps, commands, prerequisites |
 | `package <root> --out DIR` | Full categorized asset export (needs `uare[power]`) |
 | `dump-il2cpp <root> --out DIR` | Categorized IL2CPP name tables |
 | `find DIR REGEX` | Search identifiers or string literals |
-| `rebuild <workdir> --out DIR` | Auto-create Unity project from workdir |
+| `blueprint <workdir> --out DIR` | Offline scene/asset browser, per-scope manifests, behavior and dependency evidence |
+| `rebuild <workdir> --out DIR` | Create structural draft from game_model.json; retain evidence and blockers |
 | `mono-decompile <managed> --out DIR` | Decompile Mono assemblies via ILSpy |
 | `il2cpp-annotate <il2cpp> --out DIR` | Merge IL2CPP names + RVAs + Ghidra into .cs stubs |
 | `recover-shaders <source> --out DIR` | Recover ShaderLab source from type-tree JSON |
@@ -115,7 +137,7 @@ Layout:
 
 - `src/uare/` -- Python CLI and binary parsing modules
 - `skills/` -- Claude Code skills (agent guidance)
-  - `rebuild-game/` -- main interactive rebuild workflow
+  - `rebuild-game/` -- main evidence-backed reconstruction workflow
   - `analyze-apk/` -- extraction and analysis pipeline
   - `pull-from-device/` -- APK pulling from device
   - `explore-il2cpp/` -- IL2CPP name exploration

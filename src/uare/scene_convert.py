@@ -23,6 +23,7 @@ scripts, but the structure, names and transforms are preserved).
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -349,6 +350,35 @@ def convert_scenes_and_prefabs(source_dir: Path, out_dir: Path) -> ConvertResult
     if not source_dir.is_dir():
         raise UareError(f"{source_dir} is not a directory")
 
+    model_path = source_dir / "game_model.json"
+    if model_path.is_file():
+        from uare.game_model import load_model, write_json
+        from uare.project_export import export_project
+        model = load_model(model_path)
+        with staged_output(out_dir) as staging:
+            draft = staging / ".draft"
+            result = export_project(model, draft, {})
+            assets = draft / "Assets"
+            if assets.is_dir():
+                for folder in assets.iterdir():
+                    shutil.move(str(folder), str(staging / folder.name))
+            shutil.move(str(draft / "Reconstruction"), str(staging / "Reconstruction"))
+            shutil.rmtree(draft)
+            gameobjects = components = 0
+            component_headers = tuple(f"--- !u!{cid} &" for cid in set(_CLASS_IDS.values()) - {1, 4, 224})
+            for suffix in ("*.unity", "*.prefab"):
+                for path in staging.rglob(suffix):
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if line.startswith("--- !u!1 &"):
+                            gameobjects += 1
+                        elif line.startswith(component_headers):
+                            components += 1
+            write_json(staging / "convert_report.json", {"scenes": result.scenes, "prefabs": result.prefabs,
+                       "gameobjects": gameobjects, "components": components, "errors": len(result.blockers),
+                       "source": "game_model", "status": "structural_draft",
+                       "blockers": "Reconstruction/export_blockers.json"})
+        return ConvertResult(result.scenes, result.prefabs, gameobjects, components, len(result.blockers), str(out_dir))
+
     scene_dir = source_dir / "scenes"
     prefab_dir = source_dir / "assets" / "prefabs"
     total_go = total_comp = scenes = prefabs = errors = 0
@@ -364,7 +394,7 @@ def convert_scenes_and_prefabs(source_dir: Path, out_dir: Path) -> ConvertResult
                     total_go += go
                     total_comp += comp
                     scenes += 1
-                    event(LOG, logging.INFO, "scene_converted", name=scene_name, gameobjects=go)
+                    event(LOG, logging.INFO, "scene_converted", scene=scene_name, gameobjects=go)
                 except Exception as exc:
                     errors += 1
                     event(LOG, logging.WARNING, "scene_convert_failed",

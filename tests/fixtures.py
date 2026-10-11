@@ -85,7 +85,7 @@ def il2cpp_metadata_v31(tables: dict[int, list[tuple[str, str]]], extra_names: l
     namespaceIndex@4. Strides match the real layout: events 24, properties 20, methods 36,
     parameters 12, fields 12, types 88.
     """
-    strides = {3: 24, 4: 20, 5: 36, 10: 12, 11: 12, 19: 88}
+    strides = {3: 24, 4: 20, 5: 36, 10: 12, 11: 12, 19: 88, 20: 40}
     heap = bytearray(b"\x00")  # offset 0 is the empty string
     offsets: dict[str, int] = {}
 

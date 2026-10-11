@@ -275,7 +275,18 @@ NativeFormatImporter:
   assetBundleVariant:
 """
 
+_PREFAB_META = """\
+fileFormatVersion: 2
+guid: {guid}
+PrefabImporter:
+  externalObjects: {{}}
+  userData:
+  assetBundleName:
+  assetBundleVariant:
+"""
+
 _EXT_TO_TEMPLATE: dict[str, str] = {
+    ".prefab": _PREFAB_META,
     ".png": _TEXTURE_META,
     ".jpg": _TEXTURE_META,
     ".jpeg": _TEXTURE_META,

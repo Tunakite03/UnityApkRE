@@ -54,6 +54,34 @@ class DumpDefinitionsTests(unittest.TestCase):
         self.assertEqual(sections["version"], 31)
         self.assertEqual(len(sections["sections"]), 31)
 
+    def _with_images(self, ranges: list[tuple[int, int]]) -> bytearray:
+        """v31 metadata whose image table (section 20) has (typeStart, typeCount) per image."""
+        tables = self._metadata()
+        tables[20] = [("Game.dll", ""), ("mscorlib.dll", "")]
+        data = bytearray(il2cpp_metadata_v31(tables))
+        images_off = struct.unpack_from("<I", data, 8 + 20 * 8)[0]
+        for i, (start, count) in enumerate(ranges):
+            struct.pack_into("<ii", data, images_off + i * 40 + 8, start, count)
+        return data
+
+    def test_image_table_maps_types_to_assemblies(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(self._with_images([(0, 2), (2, 1)]))
+        out = self.tmp / "out"
+        out.mkdir()
+        dump_definitions(path, out)
+        self.assertEqual((out / "images.tsv").read_text().splitlines(),
+                         ["0\tGame.dll\t0\t2", "1\tmscorlib.dll\t2\t1"])
+
+    def test_image_table_that_does_not_tile_types_is_not_written(self) -> None:
+        path = self.tmp / "global-metadata.dat"
+        path.write_bytes(self._with_images([(0, 2), (5, 1)]))
+        out = self.tmp / "out"
+        out.mkdir()
+        result = dump_definitions(path, out)
+        self.assertFalse((out / "images.tsv").exists())
+        self.assertIn("images.tsv was not written", result.note)
+
     def test_obfuscated_name_indices_are_counted_not_guessed(self) -> None:
         data = bytearray(il2cpp_metadata_v31(self._metadata()))
         pairs = [struct.unpack_from("<II", data, 8 + i * 8) for i in range(31)]

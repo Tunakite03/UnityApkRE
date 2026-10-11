@@ -1,105 +1,51 @@
-# Unity Project Structure Reference
+# Generated reconstruction layout
 
-When creating a Unity project from extracted assets, follow this exact layout.
-Unity Editor expects these directories and files to exist.
-
-## Required files
-
-### ProjectSettings/ProjectVersion.txt
-
-```
-m_EditorVersion: 2022.3.10f1
-m_EditorVersionWithRevision: 2022.3.10f1 (000000000000)
-```
-
-Replace the version with the one detected from `report.json` → `inventory.unity_versions`
-(pick the most common one). The revision hash `000000000000` is a placeholder -- Unity
-Editor ignores it on project open.
-
-### ProjectSettings/ProjectSettings.asset
-
-Minimal valid PlayerSettings:
-
-```yaml
-%YAML 1.1
-%TAG !u! tag:unity3d.com,2011:
---- !u!129 &1
-PlayerSettings:
-  m_ObjectHideFlags: 0
-  serializedVersion: 22
-  productGUID: 00000000000000000000000000000000
-  AndroidBundleVersionCode: 1
-  productName: RecoveredProject
-  defaultScreenWidth: 1920
-  defaultScreenHeight: 1080
-  companyName: Recovered
-  enableNativePlatformBackendsForNewInputSystem: 1
-```
-
-### Packages/manifest.json
-
-Minimal package manifest. Add render pipeline packages if the game uses URP/HDRP
-(detectable from shader keywords or `UnityEngine.Rendering.Universal` references).
-
-```json
-{
-  "dependencies": {
-    "com.unity.ugui": "1.0.0"
-  }
-}
-```
-
-If URP detected, add:
-```json
-{
-  "dependencies": {
-    "com.unity.ugui": "1.0.0",
-    "com.unity.render-pipelines.universal": "14.0.0"
-  }
-}
-```
-
-Version numbers should match the detected Unity version's default package versions.
-
-## Asset directory structure
-
-```
+```text
+ProjectSettings/
+  ProjectVersion.txt
+  ProjectSettings.asset
+Packages/
+  manifest.json
 Assets/
-  Textures/       ← .png, .jpg, .tga, .bmp, .psd
-  Audio/          ← .wav, .mp3, .ogg, .aiff, .flac
-  Meshes/         ← .obj, .fbx, .dae, .gltf, .glb
-  Materials/      ← .mat files
-  Fonts/          ← .ttf, .otf
-  Animations/     ← .anim, animation clips
-  Videos/         ← .mp4, .webm, .mov
-  Scripts/        ← .cs files (decompiled or stubs)
-  Shaders/        ← .shader, .cginc, .hlsl
-  Scenes/         ← .unity scene files
-  Prefabs/        ← .prefab files
-  Resources/      ← catch-all for uncategorized assets
-  Plugins/
-    Android/
-      arm64-v8a/  ← third-party .so files (NOT libil2cpp/libunity)
-      armeabi-v7a/
-  StreamingAssets/ ← raw data files the game loads at runtime
-  Wwise/          ← extracted WEM audio (if game uses Wwise)
+  Scenes/
+  Prefabs/
+  Scripts/
+  Textures/
+  Audio/
+  Meshes/
+  Fonts/
+  Shaders/
+  Resources/
+  Plugins/Android/
+  StreamingAssets/
+Reconstruction/
+  Blueprint/
+    index.html
+    report.json
+    game_model.json
+    scopes/
+  CodeEvidence/IL2CPP/
+  bindings.json
+  export_blockers.json
+rebuild_report.json
 ```
 
-## .meta files
+ProjectVersion contains the selected detected version, without an invented
+revision hash. Player settings are draft defaults, not recovered project settings.
+The report records unverified regional version normalization where applicable.
 
-Every file AND folder under `Assets/` needs a `.meta` sidecar file. Use `uare generate-meta`
-to create them, or generate them manually:
+Package versions are never derived from SDK names. An optional workdir-level
+`rebuild-packages.json` supplies explicit registry versions under `dependencies`.
+Without it, the manifest is empty with a warning.
 
-- GUID: `md5(relative_path_from_Assets_root)` as 32 hex chars
-- Each file type has a specific importer (TextureImporter, AudioImporter, etc.)
-- Folders use `DefaultImporter` with `folderAsset: yes`
-- `.png` files inside `sprites/` or `Sprites/` directories use `textureType: 8` (Sprite)
+The canonical model remains outside `Assets`. Raw type-tree JSON and IL2CPP
+annotations are evidence, not executable scripts or native Unity assets.
+Supported structural scenes preserve component fields and RectTransform and
+remap local IDs. Generated media/source-script references use the same
+path-derived GUIDs as `.meta` generation. Unknown bindings are recorded as
+blockers. Material, shader, animation/controller, rig and importer fidelity need
+class-specific reconstruction and Editor verification.
 
-See `../../src/uare/asset_import.py` for the complete template set.
-
-## What NOT to include
-
-- `libil2cpp.so` and `libunity.so` -- these are engine binaries, not project assets
-- `global-metadata.dat` -- IL2CPP metadata, not a project file
-- System/Unity assemblies (`mscorlib.dll`, `UnityEngine.*.dll`) -- Unity provides these
-- The `Library/` folder -- Unity regenerates this on first open
+Do not import player engine binaries or IL2CPP metadata as project assets.
+Do not mark the project complete until import, compilation and behavioral checks
+have actually run and the remaining gaps are explicit.

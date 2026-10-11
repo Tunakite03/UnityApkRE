@@ -2,13 +2,14 @@
 
     assets/<category>/<group>/            exported objects: sprites, textures, fonts, audio, meshes, ...
     assets/objects/<class>/<group>/       type-tree JSON for objects that have no dedicated exporter
-    assets/prefabs/<group>/<bundle>.json  GameObject trees, each component inline or by file reference
+    hierarchies/<group>/<file>.json      unclassified GameObject trees; not assumed to be prefabs
     scenes/<level>/hierarchy.json         scene hierarchies
     scripts/monoscripts.tsv               MonoScript table: class, namespace, assembly
     scripts/hotdll/                       assemblies stored as TextAsset
     catalog.json                          one entry per object read: its output, or why it has none
     index.html                            filterable view of catalog.json
     report.json                           counts and per-file open errors
+    game_model.json                       scoped identities, fields and resolved/missing references
 
 The group of an object is taken from its source bundle name: YooAsset names encode the asset path,
 so the first four tokens (after `gamepackage_`, without the content hash) keep related assets
@@ -31,6 +32,8 @@ from typing import Any
 from uare.analyze import Layout, resolve_layout
 from uare.errors import UareError
 from uare.logs import event
+from uare.game_model import FileRecord, ObjectRecord, identity, resolve, save_model
+from uare.model_capture import UnityObject, capture, group_objects, serialized_name
 from uare.outdir import staged_output
 from uare.unity import _SIGNATURE_SCAN, bundle_offset
 
@@ -87,6 +90,8 @@ class CatalogEntry:
     output: str | None
     bytes: int
     note: str | None
+    object_id: str = ""
+    serialized_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -328,7 +333,6 @@ def _component_record(cpid: int, by_id: dict[int, Any], exported: dict[int, str]
     record: dict[str, Any] = {"class": cls, "path_id": cpid}
     if cpid in exported:
         record["file"] = exported[cpid]
-        return record
     if cls == "MonoBehaviour":
         record["script"] = _script_name(obj)
     try:
@@ -426,6 +430,9 @@ class _Packager:
         self._hotdll = 0
         self._exported = 0
         self._in_hierarchy = 0
+        self._model_files: list[FileRecord] = []
+        self._model_objects: list[ObjectRecord] = []
+        self._model_issues: list[str] = []
 
     def run(self, candidates: list[Path]) -> None:
         with (self._staging / "scripts" / "monoscripts.tsv").open("w", encoding="utf-8") as table:
@@ -436,6 +443,8 @@ class _Packager:
 
     def finish(self, root: Path) -> PackageResult:
         write = self._staging
+        save_model(write / "game_model.json", resolve(tuple(self._model_files),
+                   tuple(self._model_objects), tuple(self._model_issues)))
         (write / "catalog.json").write_text(json.dumps([asdict(e) for e in self._catalog], ensure_ascii=False),
                                             encoding="utf-8")
         (write / "index.html").write_text(_INDEX_HTML, encoding="utf-8")
@@ -459,50 +468,61 @@ class _Packager:
             objs = list(env.objects)
         except Exception as exc:  # UnityPy raises library-specific errors; the file is reported, not dropped
             self._errors += 1
+            self._model_issues.append(f"Container unreadable: {rel} ({type(exc).__name__})")
             event(LOG, logging.WARNING, "package_open_failed", path=rel, error=str(exc))
             return
         try:
             self._files += 1
             self._objects += len(objs)
-            exported: dict[int, str] = {}
-            pending: list[Any] = []
-            for obj in objs:
-                try:
-                    cls = _class_name(obj)
-                    if cls == "MonoScript":
-                        self._write_monoscript_row(rel, obj)
-                        continue
-                    category = self._category(obj, cls)
-                    if category is None:
-                        pending.append(obj)
-                        continue
-                    if category == "scripts":
-                        directory = self._staging / "scripts" / "hotdll"
-                    else:
-                        trimmed = _trim_group(group, category)
-                        directory = self._staging / "assets" / category / trimmed
-                    stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
-                                   self._used[str(directory)])
-                    if cls == "TextAsset" and category == "audio":
-                        target, note = _export_fev_bank(_as_bytes(obj.read().m_Script), directory, stem)
-                    else:
-                        target, note = _export_object(obj, cls, directory, stem)
-                except _FAILURES as exc:
-                    self._record(rel, obj, "unclassified", None, f"{type(exc).__name__}: {exc}")
-                    continue
-                except Exception as exc:  # one object must not stop the run; its reason goes to the catalog
-                    self._record(rel, obj, "unclassified", None, f"unexpected {type(exc).__name__}: {exc}")
-                    continue
-                if target is not None:
-                    exported[obj.path_id] = target.relative_to(self._staging).as_posix()
-                self._record(rel, obj, category, target, note)
-
-            tree, homed, failures = _build_hierarchy(objs, exported)
-            hierarchy_output = self._write_hierarchy(path, rel, group, tree) if tree else None
-            for obj in pending:
-                self._record_pending(rel, obj, group, homed, hierarchy_output, failures)
+            if not objs and offset is None:
+                self._model_files.append(FileRecord(rel, path.name, ()))
+            for serialized, scoped_objects in sorted(group_objects(objs, rel).items()):
+                self._package_objects(rel, group, serialized, scoped_objects)
         finally:
             self._scratch.unlink(missing_ok=True)
+
+    def _package_objects(self, rel: str, group: str, serialized: str,
+                         objs: list[UnityObject]) -> None:
+        exported: dict[int, str] = {}
+        pending: list[UnityObject] = []
+        for obj in objs:
+            try:
+                cls = _class_name(obj)
+                if cls == "MonoScript":
+                    self._write_monoscript_row(rel, obj)
+                    continue
+                category = self._category(obj, cls)
+                if category is None:
+                    pending.append(obj)
+                    continue
+                if category == "scripts":
+                    directory = self._staging / "scripts" / "hotdll"
+                else:
+                    trimmed = _trim_group(group, category)
+                    directory = self._staging / "assets" / category / trimmed
+                stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
+                               self._used[str(directory)])
+                if cls == "TextAsset" and category == "audio":
+                    target, note = _export_fev_bank(_as_bytes(getattr(obj.read(), "m_Script")), directory, stem)
+                else:
+                    target, note = _export_object(obj, cls, directory, stem)
+            except _FAILURES as exc:
+                self._record(rel, obj, "unclassified", None, f"{type(exc).__name__}: {exc}")
+                continue
+            except Exception as exc:  # one object must not stop the run; its reason goes to the catalog
+                self._record(rel, obj, "unclassified", None, f"unexpected {type(exc).__name__}: {exc}")
+                continue
+            if target is not None:
+                exported[obj.path_id] = target.relative_to(self._staging).as_posix()
+            self._record(rel, obj, category, target, note)
+
+        tree, homed, failures = _build_hierarchy(objs, exported)
+        hierarchy_output = self._write_hierarchy(Path(serialized), rel, group, tree) if tree else None
+        for obj in pending:
+            self._record_pending(rel, obj, group, homed, hierarchy_output, failures)
+        file_record, object_records = capture(rel, serialized, objs, exported)
+        self._model_files.append(file_record)
+        self._model_objects.extend(object_records)
 
     def _open(self, path: Path, raw: bytes, offset: int | None) -> Any:
         if offset is None:
@@ -555,18 +575,21 @@ class _Packager:
             if category not in ("monoscripts",):
                 self._exported += 1
         self._catalog.append(CatalogEntry(obj.path_id, _class_name(obj), _object_name(obj), category, rel,
-                                          output, size, note))
+                                          output, size, note, identity(rel, serialized_name(obj, rel), obj.path_id),
+                                          serialized_name(obj, rel)))
 
     def _write_hierarchy(self, path: Path, rel: str, group: str, tree: list[dict[str, Any]]) -> str:
         payload = _json_bytes({"source": rel, "roots": tree})
         if _SCENE.match(path.stem):
             self._scenes.append(path.stem)
-            target = self._staging / "scenes" / path.stem / "hierarchy.json"
+            folder = _unique(path.stem, 0, self._used["scene_names"])
+            target = self._staging / "scenes" / folder / "hierarchy.json"
             category = "scenes"
         else:
-            directory = self._staging / "assets" / "prefabs" / group
+            # A tree in an arbitrary bundle is not evidence of a prefab asset.
+            directory = self._staging / "hierarchies" / group
             target = directory / _unique(_sanitize(path.stem) + ".json", 0, self._used[str(directory)])
-            category = "prefabs"
+            category = "hierarchies"
         _write(target, payload)
         self._counts[category] += 1
         return target.relative_to(self._staging).as_posix()
@@ -578,7 +601,9 @@ class _Packager:
             self._in_hierarchy += 1
             self._counts["components"] += 1
             self._catalog.append(CatalogEntry(obj.path_id, cls, _object_name(obj), "components", rel,
-                                              hierarchy_output, 0, "stored in the hierarchy JSON"))
+                                              hierarchy_output, 0, "stored in the hierarchy JSON",
+                                              identity(rel, serialized_name(obj, rel), obj.path_id),
+                                              serialized_name(obj, rel)))
             return
         if obj.path_id in failures:
             self._record(rel, obj, "unclassified", None, failures[obj.path_id], output=None)
@@ -630,9 +655,10 @@ def summarize(result: PackageResult) -> list[str]:
         f"root              : {result.root}",
         f"files opened      : {result.files} ({result.errors} open errors)",
         f"objects           : {result.objects}",
-        f"exported          : {result.exported} files, {result.in_hierarchy} components in prefab/scene JSON, "
+        f"exported          : {result.exported} files, {result.in_hierarchy} components in hierarchy JSON, "
         f"skipped {result.skipped} (reasons in catalog.json)",
         f"scenes            : {', '.join(result.scenes) or '-'}",
         "categories        : " + ", ".join(f"{k}={v}" for k, v in result.categories.items()),
-        "index             : index.html (filter by class/name/source), catalog.json",
+        "model             : game_model.json (scoped identities, fields, resolved and missing references)",
+        "index             : index.html (raw catalog); use `uare blueprint` for scene and system reports",
     ]

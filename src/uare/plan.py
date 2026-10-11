@@ -62,8 +62,11 @@ def build_plan(package: str, workdir: Path, prerequisites: Prerequisites) -> Pla
         Step("analyze", f"scripts/uare analyze {wd}/extracted --out {wd}/analysis",
              f"{wd}/analysis/ (report.json, il2cpp/, files.jsonl)", needs_device=False, needs_unitypy=False),
         Step("package", f"scripts/uare package {wd}/extracted --out {wd}/extracted-assets",
-             f"{wd}/extracted-assets/ (assets by category and bundle, prefabs, scenes, catalog.json)",
+             f"{wd}/extracted-assets/ (media, game_model.json, catalog.json, raw hierarchies)",
              needs_device=False, needs_unitypy=True),
+        Step("blueprint", f"scripts/uare blueprint {wd} --out {wd}/blueprint",
+             f"{wd}/blueprint/ (scene manifests, asset usage, animations, SDK evidence, blockers)",
+             needs_device=False, needs_unitypy=False),
     )
     blockers: list[str] = []
     if prerequisites.adb_error is not None:
@@ -79,6 +82,7 @@ def build_plan(package: str, workdir: Path, prerequisites: Prerequisites) -> Pla
         "UARE_REAL_DATA_DIR=<workdir>/extracted/Data scripts/run-tests  (adds the real-data smoke test after an analyze)",
         "catalog.json: every entry has an output or a note; report.json open errors is 0",
         "scripts/uare summary <workdir>/analysis  (sanity check of the analysis)",
+        "blueprint/index.html: inspect scenes, asset usage, missing references and unverified behavior",
     )
     return Plan(package=package, workdir=wd, ready=not blockers, blockers=tuple(blockers),
                 steps=steps, checks=checks)

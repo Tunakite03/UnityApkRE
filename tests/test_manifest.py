@@ -54,7 +54,7 @@ def _workdir(root: Path, skipped: int = 0, errors: int = 0) -> None:
 
 def _complete_run() -> RunLog:
     run = RunLog()
-    for name in ("pull", "extract", "analyze", "package"):
+    for name in ("pull", "extract", "analyze", "package", "blueprint"):
         run.stage(name, lambda: None)
     return run
 
@@ -77,7 +77,7 @@ class ManifestTests(unittest.TestCase):
         _workdir(self.root, skipped=0)
         manifest = build_manifest(self.root, _complete_run())
         self.assertEqual(manifest["status"], "complete")
-        self.assertEqual([s["status"] for s in manifest["stages"]], ["ok", "ok", "ok", "ok"])
+        self.assertEqual([s["status"] for s in manifest["stages"]], ["ok", "ok", "ok", "ok", "ok"])
 
     def test_failed_stage_is_recorded_and_later_stages_are_not_run(self) -> None:
         _workdir(self.root)

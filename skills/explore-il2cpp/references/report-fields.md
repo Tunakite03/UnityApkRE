@@ -15,7 +15,7 @@ Two opt-in commands handle protected builds: `recover-metadata` (writes `global-
 
 ## `uare package` (packaged/ directory)
 
-Full asset export (`extracted-assets/`, written by `run` or `package`). Assets are grouped by category, then by source bundle: `assets/<category>/<bundle group>/`. Categories include `sprites`, `textures`, `fonts`, `audio` (WAV, and FMOD banks with their decoded subsounds), `animations`, `animators`, `spines`, `meshes` (OBJ), `materials`, `shaders`, `textassets`, `monobehaviours`, `manifests`, `videos`, `objects` (type-tree JSON). `assets/prefabs/<bundle group>/` holds GameObject trees with their components; `scenes/<level>/hierarchy.json` holds scene trees. `scripts/hotdll/` holds the hot-update assembly files **as stored**: 19 of them in this build are not plain .NET assemblies (no `MZ` header), so they are encrypted or otherwise opaque, and `report.json` / `manifest.json` report them as `not-pe`. `scripts/monoscripts.tsv`, `catalog.json` (one record per object: class, name, category, source, output, note) and `index.html` (filter by class/name/source/category). Objects that cannot be decoded are listed with a `note` (e.g. `streamed texture`) instead of being dropped.
+Full asset export (`extracted-assets/`, written by `run` or `package`). Assets are grouped by category, then by source bundle: `assets/<category>/<bundle group>/`. Categories include `sprites`, `textures`, `fonts`, `audio` (WAV, and FMOD banks with their decoded subsounds), `animations`, `animators`, `spines`, `meshes` (OBJ), `materials`, `shaders`, `textassets`, `monobehaviours`, `manifests`, `videos`, `objects` (type-tree JSON). `hierarchies/<bundle group>/` holds unclassified GameObject trees with their components; prefab identity requires container evidence; `scenes/<level>/hierarchy.json` holds scene trees. `scripts/hotdll/` holds the hot-update assembly files **as stored**: 19 of them in this build are not plain .NET assemblies (no `MZ` header), so they are encrypted or otherwise opaque, and `report.json` / `manifest.json` report them as `not-pe`. `scripts/monoscripts.tsv`, `catalog.json` (one record per object: class, name, category, source, output, note) and `index.html` (filter by class/name/source/category). Objects that cannot be decoded are listed with a `note` (e.g. `streamed texture`) instead of being dropped.
 
 ## `uare export-assets` (assets/ directory)
 
@@ -104,3 +104,15 @@ With `--backend unitypy` (needs `pip install uare[power]`) the same command addi
 | `packing_verdict` | `likely_packed_or_encrypted` when entropy is at least 7.2, or at least 25% of windows are high entropy, or (encrypted chunk + at least 50% filler windows). `normal` when entropy is at most 7.0. In the 7.0-7.2 band, structure decides: a broken section table or at least 25% filler leans packed, a clean table with symbols and little filler leans normal, otherwise `inconclusive`. `no_exec_segment` when there is no code segment |
 
 A packed library can show low average entropy, because a large filler region dilutes it. The window counts expose that case, which is why the verdict uses them.
+
+## Reconstruction blueprint
+
+`package` now writes `game_model.json`: scoped identities, serialized fields and
+resolved/null/missing/ambiguous references. Catalog rows carry `object_id` and
+`serialized_file`; `path_id` is not a global key.
+
+`blueprint <workdir> --out DIR` writes `report.json`, `scopes/*.json`, `overview.md`
+and a self-contained `index.html`. Scene scopes join hierarchy, script bindings,
+assets, animation data and serialized events. Script metadata provides member
+name evidence, not method behavior. Dependency versions and runtime use stay
+unknown. See `docs/redesign.md` for optional behavior/observation input contracts.

@@ -223,9 +223,10 @@ class PackageTests(unittest.TestCase):
         icons = sorted(p.name for p in (out / "assets/textures/sprite/pet/pet/1009").glob("icon*.png"))
         self.assertEqual(len(icons), 2)
 
-    def test_prefab_json_nests_components(self) -> None:
+    def test_unclassified_hierarchy_nests_components_without_claiming_prefab(self) -> None:
         _result, out = self._package()
-        prefab = next((out / "assets/prefabs").glob("**/*.json"))
+        self.assertFalse((out / "assets/prefabs").exists())
+        prefab = next((out / "hierarchies").glob("**/*.json"))
         roots = json.loads(prefab.read_text(encoding="utf-8"))["roots"]
         self.assertEqual(roots[0]["name"], "Root")
         self.assertEqual(roots[0]["children"][0]["name"], "Child")
@@ -251,6 +252,23 @@ class PackageTests(unittest.TestCase):
         result, out = self._package()
         self.assertEqual(result.errors, 1)
         self.assertTrue((out / "report.json").is_file())
+
+    def test_package_model_keeps_serialized_file_scope_for_duplicate_path_ids(self) -> None:
+        from uare.game_model import identity, load_model
+        first = _Obj("MonoBehaviour", 1, "Controller", _Pay(), typetree={"target": {"m_FileID": 1, "m_PathID": 1}})
+        second = _Obj("Material", 1, "Material", _Pay(), typetree={"m_Name": "Material"})
+        first.assets_file = _Pay(name="CAB-A", externals=[_Pay(path="archive:/CAB-B/CAB-B")])
+        second.assets_file = _Pay(name="CAB-B", externals=[])
+        ENVS[b"sprite"] = [first, second]
+        _result, out = self._package()
+        model = load_model(out / "game_model.json")
+        self.assertEqual(len(model.objects), 2)
+        source = model.objects[0].source
+        edge = next(r for r in model.references if r.field == "target")
+        self.assertEqual(edge.source_id, identity(source, "CAB-A", 1))
+        self.assertEqual(edge.target_id, identity(source, "CAB-B", 1))
+        catalog = json.loads((out / "catalog.json").read_text())
+        self.assertEqual(len({row["object_id"] for row in catalog}), 2)
 
     def test_run_fails_before_pulling_when_unitypy_missing(self) -> None:
         sys.modules["UnityPy"] = None

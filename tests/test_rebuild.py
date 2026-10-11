@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from uare.rebuild import rebuild, _detect_unity_version, _copy_tree
+from uare.game_model import GameModel, save_model
 
 
 def _setup_workdir(root: Path) -> None:
@@ -30,6 +31,7 @@ def _setup_workdir(root: Path) -> None:
     scripts = assets / "assets" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "Game.cs").write_text("class Game {}")
+    save_model(assets / "game_model.json", GameModel((), (), (), ()))
 
     extracted = root / "extracted"
     extracted.mkdir(parents=True)
@@ -40,9 +42,11 @@ class DetectUnityVersionTests(unittest.TestCase):
         report = {"inventory": {"unity_versions": {"2022.3.10f1": 5, "2021.3.0f1": 2}}}
         self.assertEqual(_detect_unity_version(report), "2022.3.10f1")
 
-    def test_default_when_empty(self):
+    def test_missing_version_requires_evidence(self):
         report = {"inventory": {"unity_versions": {}}}
-        self.assertEqual(_detect_unity_version(report), "2021.3.0f1")
+        from uare.game_model import ModelError
+        with self.assertRaises(ModelError):
+            _detect_unity_version(report)
 
 
 class CopyTreeTests(unittest.TestCase):

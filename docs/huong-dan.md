@@ -1,3 +1,9 @@
+> **Current workflow:** `run` now ends with a reconstruction blueprint. Open
+> `blueprint/index.html`; use scene manifests, references and explicit gaps as the
+> primary result. The mandatory checkpoint and category-only rebuild described
+> in the older guide below are superseded by [the reconstruction architecture](redesign.md)
+> and the current `rebuild-game` skill. Legacy exports require repackaging.
+
 # Hướng dẫn: unity-apk-re từng bước
 
 Plugin hướng dẫn AI agent reverse engineering và rebuild game Unity Android.

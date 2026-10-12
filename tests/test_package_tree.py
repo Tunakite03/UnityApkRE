@@ -480,6 +480,21 @@ class LayoutTests(unittest.TestCase):
                 pt.package(self.data, out)
         self.assertFalse(out.exists())
 
+    def test_font_payload_given_as_byte_list_is_written_as_bytes(self) -> None:
+        ttf = [0, 1, 0, 0, 0, 16, 0, 0]
+        self._bundle("fonts", _in_file("CAB-font", [_Obj("Font", 40, "Sample", _Pay(m_FontData=ttf))]))
+        _result, out = self._package()
+        font = next((out / "shared/fonts").rglob("Sample.ttf"))
+        self.assertEqual(font.read_bytes(), bytes(ttf))
+
+    def test_unsupported_binary_payload_is_recorded_as_unclassified(self) -> None:
+        self._bundle("fonts", _in_file("CAB-font", [_Obj("Font", 40, "Broken", _Pay(m_FontData={"raw": 1}))]))
+        _result, out = self._package()
+        catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
+        entry = next(e for e in catalog if e["name"] == "Broken")
+        self.assertIsNone(entry["output"])
+        self.assertIn("unsupported", entry["note"])
+
     def test_atlas_pages_are_the_name_lines_of_page_blocks_only(self) -> None:
         self.assertEqual(pt._atlas_pages(ATLAS_TEXT), ["hero.png", "hero mid.png", "missing.png"])
 

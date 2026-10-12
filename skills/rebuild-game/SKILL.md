@@ -39,12 +39,33 @@ choices with the capture. Reusable tools belong under `vendor/`.
    actions, results and evidence locations in `<workdir>/observations.json`.
    Distinguish physical Unity scenes from UI screens and game states.
 8. Regenerate the blueprint into a fresh output directory after adding evidence.
-9. When project generation is requested, run `uare rebuild <workdir> --out <project>`.
-   It consumes `extracted-assets/game_model.json`, writes a fresh blueprint under
-   `Reconstruction/Blueprint`, and exports supported structural scenes/prefabs.
+9. When the user has created a Unity project with Unity MCP installed, rebuild into
+   that project one scene at a time (preferred):
+   - `uare scene-spec <workdir> --assets <package-dir> --out <new-dir>` writes one
+     spec per scene (hierarchy, flattened serialized fields, resolved references,
+     the scene's assets with sprite and material settings, tags and sorting layers).
+   - Add `unity/com.uare.scenebuilder` to the project's `Packages/manifest.json` as a
+     `file:` dependency. Its `.meta` files carry the placeholder script GUID; keep them.
+   - Per scene, call `Uare.SceneBuilder.Editor.UareSceneBuilder.BuildScene(<spec>,
+     "Assets/<Game>")` through MCP `execute_code` and save the returned report into a
+     fresh workspace folder. It validates before writing, never replaces an existing
+     scene or a differing file, and leaves an empty scene when a build fails.
+   - Verify each scene against its spec (GameObjects, components, missing scripts,
+     material slots), look at a camera capture, and check the console. Scripts that
+     are not in the project become `UareMissingScript` placeholders holding the
+     original identity and fields; report them, never present them as behavior.
+   - With authorized decrypted hot-update code, follow the guide's game-code step
+     (stub DLLs, stub repair, Auto Reference off). Report `stubBoundScripts`
+     separately: a stub keeps fields and identity, not original logic.
+   Otherwise, when a whole structural draft is requested, run
+   `uare rebuild <workdir> --out <project>`. It consumes `game_model.json`, writes a
+   fresh blueprint under `Reconstruction/Blueprint`, and exports structural scenes/prefabs.
 10. Validate in an available matching Unity Editor. Report import, compilation and
     Play Mode independently, with exact commands/logs and exercised scenarios.
-    Without an Editor or runnable game, these checks remain `not_tested`.
+    The builder package's tests (add it to `testables`) cover property writing
+    (EditMode) and load every scene for 120 frames (PlayMode, records in
+    `Logs/uare-playmode.jsonl`). Without an Editor or runnable game, these checks
+    remain `not_tested`.
 
 ## Required analysis per scene or state
 

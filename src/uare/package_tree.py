@@ -184,13 +184,16 @@ def _unique(base: str, path_id: int, used: set[str]) -> str:
 
 
 def _as_bytes(value: Any) -> bytes:
+    """Raw bytes of a binary payload. A list of byte values is converted, never stringified."""
     if value is None:
         return b""
-    if isinstance(value, (bytes, bytearray)):
+    if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
     if isinstance(value, str):
         return value.encode("utf-8", errors="surrogateescape")
-    return str(value).encode("utf-8", errors="surrogateescape")
+    if isinstance(value, (list, tuple)) and all(isinstance(b, int) and 0 <= b <= 255 for b in value):
+        return bytes(value)
+    raise TypeError(f"binary payload has unsupported type {type(value).__name__}")
 
 
 def _class_name(obj: Any) -> str:

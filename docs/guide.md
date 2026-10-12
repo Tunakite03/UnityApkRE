@@ -309,6 +309,25 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
 - Generates `decrypted/*.dll` (decompilable via ILSpy), `keys.json` (reusable with `--keys`), and `report.json`.
 - Custom algorithms can be specified explicitly: `--algo <cipher> --key <hex> --iv <hex> --magic <hex>`.
 
+## Step 12: Rebuild Scenes One at a Time in Your Own Unity Project (`scene-spec` + scene builder)
+
+Create the Unity project yourself (matching Unity version, render pipeline of your choice) and install Unity MCP. The agent then rebuilds one scene at a time into that project.
+
+```bash
+scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/scene-specs"
+```
+
+- Writes one `<Scene>.json` per scene folder: GameObjects in hierarchy order, every serialized field flattened to a Unity property path, each reference resolved to an object of the scene, an exported file under `shared/`, or an explicit `missing`/`unresolved` entry, plus the scene's assets (sprite pivot/PPU/border, material shader/texture/color) and the original tags, layers and sorting layers.
+- Add the builder package to the project's `Packages/manifest.json`: `"com.uare.scenebuilder": "file:<path to this repo>/unity/com.uare.scenebuilder"`. Keep its `.meta` files: placeholders in built scenes reference the placeholder script GUID.
+- Build one scene through MCP `execute_code`: `return Uare.SceneBuilder.Editor.UareSceneBuilder.BuildScene("<spec>.json", "Assets/<Game>");`. The scene is saved to `Assets/<Game>/Scenes/`, its files to `Assets/<Game>/Shared/`. The call returns a JSON report (properties applied/unmatched, references bound/missing, placeholder scripts, shader substitutions, settings changes).
+- Safety: everything is validated before the first write; an existing scene or a differing project file is never replaced; a failed build leaves an empty scene, not a half-built one. To rebuild a scene, delete its `.unity` file first.
+- Scripts that are not in the project become `UareMissingScript` placeholders that store the original class, namespace, assembly, object ID and fields. Shaders the project lacks are replaced by URP sprite or UI shaders and listed in the report.
+- Tests: add `"testables": ["com.uare.scenebuilder"]` to the manifest. EditMode tests cover property writing; the PlayMode test loads every scene under `Assets` for 120 frames and appends results to `Logs/uare-playmode.jsonl`.
+- Spec v2 also carries each scene's RenderSettings and LightmapSettings, every saved material property (textures with scale/offset, floats, ints, colors, keywords, render queue), the original texture settings (filter, wrap, mipmaps, readable, Alpha8) and ScriptableObject assets such as TMP font assets and Spine `SkeletonDataAsset`/`SpineAtlasAsset`, rebuilt from their own fields when their script exists in the project. Text files keep their original TextAsset name; `.skel` becomes `.skel.txt` and `.atlas` becomes `.atlas.bytes`, because spine-unity's importer acts on `.skel.bytes`/`.atlas.txt` and can open modal dialogs.
+- Root order: a build keeps no editor root order. A probe bundle on 2022.3 showed that Unity loads the roots of a built scene in path-ID order, so the rebuilt order (`rootOrderBasis: path_id`) is the order the shipped game sees at runtime.
+- Game code (only with the user's explicit authorization to decrypt): decrypt with `decrypt-hotdll`, run `il2cpp-enrich` for Il2CppDumper stub DLLs of the AOT assemblies, copy the decrypted hot-update DLLs plus the stubs they reference into the project, and turn off Auto Reference for all of them (`isExplicitlyReferenced: 1`), or a game type such as a global `ObjectPool<T>` can break package compilation. Stub DLLs need two repairs before the Editor loads them cleanly: attribute type arguments stored without an assembly name, and the bodiless `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` type. The builder then binds scripts to the real hot-update types, reports stub-bound scripts separately (`stubBoundScripts`: original fields, no original logic), and keeps placeholders only for types that are absent.
+- Spine 3.8 data needs spine-unity 3.8. Its git package lacks spine-csharp, so install it as an embedded package: `spine-unity/Assets/Spine` plus `spine-csharp/src` copied into `Runtime/spine-csharp`.
+
 ---
 
 ## Technical Limitations

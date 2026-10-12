@@ -1,0 +1,18 @@
+{
+    "name": "Uare.SceneBuilder.Editor",
+    "rootNamespace": "Uare.SceneBuilder.Editor",
+    "references": [
+        "Uare.SceneBuilder"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

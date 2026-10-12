@@ -341,6 +341,14 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scene_spec(args: argparse.Namespace) -> int:
+    from uare.scene_spec import build_specs
+    from uare.scene_spec import summarize as summarize_specs
+    result = build_specs(Path(args.workdir) / args.assets, Path(args.out))
+    print("\n".join(summarize_specs(result)))
+    return 0
+
+
 def cmd_mono_decompile(args: argparse.Namespace) -> int:
     import shutil as _shutil
     from uare.mono_decompile import decompile_all, resolve_decompiler, DEFAULT_VENDOR_ROOT as ILSPY_VENDOR
@@ -562,6 +570,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the Unity project")
     p.set_defaults(func=cmd_rebuild)
+
+    p = sub.add_parser("scene-spec", help="write one build spec per scene for the Unity scene builder package")
+    p.add_argument("workdir", help="directory from a prior `uare run` (with extracted-assets/, ...)")
+    p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
+    p.add_argument("--out", required=True, help="empty directory for the scene specs")
+    p.set_defaults(func=cmd_scene_spec)
 
     p = sub.add_parser("mono-decompile", help="decompile Mono assemblies to C# via ILSpy")
     p.add_argument("managed", help="path to the Managed/ directory containing .dll files")

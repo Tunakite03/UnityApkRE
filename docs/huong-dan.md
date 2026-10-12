@@ -298,6 +298,25 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
 - Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`.
 - Nếu game dùng thuật toán riêng: đưa key trực tiếp qua `--algo --key --iv --magic`.
 
+### Bước 12: dựng lại từng scene vào project Unity của bạn — `scene-spec` + scene builder
+
+Bạn tự tạo project Unity (đúng phiên bản, chọn render pipeline) và cài Unity MCP. Agent sẽ dựng từng scene một vào project đó.
+
+```bash
+scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/scene-specs"
+```
+
+- Mỗi scene ra một `<Scene>.json`: GameObject theo thứ tự hierarchy, mọi field serialize trải phẳng thành property path của Unity, mỗi tham chiếu được giải thành object trong scene, file đã xuất trong `shared/`, hoặc ghi rõ `missing`/`unresolved`; kèm danh sách asset của scene (pivot/PPU/border của sprite, shader/texture/màu của material) và tag, layer, sorting layer gốc.
+- Thêm gói builder vào `Packages/manifest.json` của project: `"com.uare.scenebuilder": "file:<đường dẫn tới repo này>/unity/com.uare.scenebuilder"`. Giữ các file `.meta` của gói: placeholder trong scene trỏ tới GUID script placeholder.
+- Dựng một scene qua MCP `execute_code`: `return Uare.SceneBuilder.Editor.UareSceneBuilder.BuildScene("<spec>.json", "Assets/<Game>");`. Scene lưu ở `Assets/<Game>/Scenes/`, file asset ở `Assets/<Game>/Shared/`. Lệnh trả về báo cáo JSON (property đã ghi/không khớp, tham chiếu đã gắn/thiếu, script placeholder, shader thay thế, thay đổi settings).
+- An toàn: kiểm tra toàn bộ trước khi ghi; không bao giờ ghi đè scene đã có hoặc file khác nội dung; build lỗi thì để lại scene trống, không để scene dựng dở. Muốn dựng lại scene thì xoá file `.unity` của nó trước.
+- Script không có trong project thành placeholder `UareMissingScript`, giữ class, namespace, assembly, object ID và field gốc. Shader project không có được thay bằng shader sprite/UI của URP và ghi trong báo cáo.
+- Test: thêm `"testables": ["com.uare.scenebuilder"]` vào manifest. Test EditMode kiểm tra việc ghi property; test PlayMode chạy mọi scene trong `Assets` 120 frame và ghi kết quả vào `Logs/uare-playmode.jsonl`.
+- Spec v2 có thêm RenderSettings/LightmapSettings của từng scene, toàn bộ thuộc tính material đã lưu (texture kèm scale/offset, float, int, màu, keyword, render queue), thiết lập texture gốc (filter, wrap, mipmap, readable, Alpha8) và các asset ScriptableObject như font TMP, `SkeletonDataAsset`/`SpineAtlasAsset` của Spine, dựng lại từ chính field gốc khi project có script tương ứng. File text giữ tên TextAsset gốc; `.skel` thành `.skel.txt`, `.atlas` thành `.atlas.bytes`, vì bộ import của spine-unity tự xử lý `.skel.bytes`/`.atlas.txt` và có thể bật hộp thoại modal.
+- Thứ tự root: bản build không lưu thứ tự root của editor. Thử bằng bundle trên 2022.3 cho thấy Unity nạp root của scene đã build theo thứ tự path ID, nên thứ tự dựng lại (`rootOrderBasis: path_id`) chính là thứ tự game gốc thấy lúc chạy.
+- Mã game (chỉ khi người dùng cho phép giải mã rõ ràng): giải mã bằng `decrypt-hotdll`, chạy `il2cpp-enrich` để có stub DLL của các assembly AOT, copy DLL hot-update đã giải mã và các stub mà chúng tham chiếu vào project, rồi tắt Auto Reference cho tất cả (`isExplicitlyReferenced: 1`), nếu không một kiểu của game như `ObjectPool<T>` ở namespace toàn cục có thể làm hỏng biên dịch package. Stub DLL cần sửa hai chỗ để Editor nạp sạch: tham số kiểu trong attribute thiếu tên assembly, và kiểu `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` không có thân hàm. Builder khi đó gắn script vào kiểu hot-update thật, báo riêng script gắn vào stub (`stubBoundScripts`: có field gốc, không có logic gốc) và chỉ giữ placeholder cho kiểu không có.
+- Dữ liệu Spine 3.8 cần spine-unity 3.8. Bản git của nó thiếu spine-csharp, nên cài dạng package nhúng: `spine-unity/Assets/Spine` cộng `spine-csharp/src` copy vào `Runtime/spine-csharp`.
+
 **`export-assets`** đọc mọi SerializedFile và xuất ra:
 
 | File | Nội dung |

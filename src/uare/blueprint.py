@@ -20,6 +20,14 @@ ANIMATION_CLASSES = frozenset({"Animator", "Animation", "AnimationClip", "Animat
                                "AnimatorOverrideController", "Avatar", "AvatarMask"})
 SETTINGS_CLASSES = frozenset({"RenderSettings", "LightmapSettings", "NavMeshSettings", "OcclusionCullingSettings"})
 _LEVEL = re.compile(r"^level(\d+)$")
+_GUID_FILE = re.compile(r"[0-9a-f]{32}")
+# Public asset GUIDs of Unity packages, with the object name each asset contains. When a build stores
+# these assets in files named by the GUID, its serialized files are named by source asset GUID.
+_GUID_ANCHORS = {
+    "8f586378b4e144a9851e7b34d9b748ee": "LiberationSans SDF",  # TextMeshPro default font asset
+    "f952c082cb03451daed3ee968ac6c63e": "Default Style Sheet",  # TextMeshPro default style sheet
+}
+GUID_FILE_EVIDENCE = "serialized file named by source asset GUID (verified by package GUID anchors)"
 
 
 @dataclass(frozen=True)
@@ -149,9 +157,27 @@ class ScopeSpec:
         return seed + "-" + self.kind
 
 
+def guid_named_layout(model: GameModel) -> bool:
+    """True when every package anchor present in the build sits in a file named by its GUID."""
+    names: dict[str, set[str]] = defaultdict(set)
+    for obj in model.objects:
+        if obj.serialized_file in _GUID_ANCHORS:
+            names[obj.serialized_file].add(obj.name)
+    return bool(names) and all(_GUID_ANCHORS[file] in found for file, found in names.items())
+
+
+def _root_game_objects(ids: set[str], by_id: dict[str, ObjectRecord],
+                       edges: dict[str, tuple[Reference, ...]]) -> list[str]:
+    transforms = {oid for oid in ids if by_id[oid].class_name in {"Transform", "RectTransform"}}
+    roots = (_target(edges, oid, "m_GameObject") for oid in sorted(transforms)
+             if _target(edges, oid, "m_Father") not in transforms)
+    return [oid for oid in roots if oid in ids]
+
+
 def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
                     edges: dict[str, tuple[Reference, ...]]) -> list[ScopeSpec]:
     aliases = _bundle_assets(model, edges)
+    guid_layout = guid_named_layout(model)
     scene_hashes: dict[tuple[str, str], set[str]] = defaultdict(set)
     for obj in model.objects:
         if obj.class_name != "AssetBundle" or obj.data.get("m_IsStreamedSceneAssetBundle") is not True:
@@ -200,6 +226,14 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
                                        file.source, file.serialized_file, frozenset(members), oid, None,
                                        "AssetBundle.m_Container"))
             remaining = ids - covered
+            roots = _root_game_objects(remaining, by_id, edges)
+            if guid_layout and not prefab_roots and _GUID_FILE.fullmatch(file.serialized_file) and len(roots) == 1:
+                # One asset per file: a single-root hierarchy is that asset, a prefab with this GUID.
+                members = _structural_ids(roots[0], by_id, edges)
+                specs.append(ScopeSpec("prefab", by_id[roots[0]].name or file.serialized_file, file.source,
+                                       file.serialized_file, frozenset(members), roots[0], None,
+                                       GUID_FILE_EVIDENCE))
+                remaining -= members
             if any(by_id[oid].class_name == "GameObject" for oid in remaining):
                 specs.append(ScopeSpec("unclassified_hierarchy", file.serialized_file, file.source,
                                        file.serialized_file, frozenset(remaining), None, None,

@@ -3,7 +3,14 @@ rem Run the uare CLI straight from a checkout or an installed Claude Code plugin
 rem cmd re-parses arguments: wrap regex patterns in double quotes, e.g. "(?i)shop|buy".
 setlocal
 set "ROOT=%~dp0.."
-if defined UARE_PYTHON (set "PY=%UARE_PYTHON%") else (set "PY=py -3")
+rem Interpreter order: UARE_PYTHON, then the plugin-local `power` environment, then the py launcher.
+if defined UARE_PYTHON (
+  set "PY=%UARE_PYTHON%"
+) else if exist "%ROOT%\.venv-power\Scripts\python.exe" (
+  set "PY="%ROOT%\.venv-power\Scripts\python.exe""
+) else (
+  set "PY=py -3"
+)
 if defined PYTHONPATH (set "PYTHONPATH=%ROOT%\src;%PYTHONPATH%") else (set "PYTHONPATH=%ROOT%\src")
 set "PYTHONDONTWRITEBYTECODE=1"
 rem The current directory is removed from sys.path so local files cannot shadow uare or the stdlib.

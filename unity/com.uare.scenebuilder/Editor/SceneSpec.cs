@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace Uare.SceneBuilder.Editor
 {
-    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 2).
+    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 3).
     [Serializable]
     internal sealed class SceneSpec
     {
@@ -115,6 +116,31 @@ namespace Uare.SceneBuilder.Editor
         public string scriptNamespace;
         public string scriptAssembly;
         public PropertySpec[] props;
+        // Material properties the spec could not carry (e.g. non-finite values); reported, never applied.
+        public string[] droppedProperties;
+        // An image: none, single or multiple, with every sprite the build cuts from it.
+        public string spriteMode;
+        public SpriteRectSpec[] sprites;
+        // A sprite entry (kind sprite): its name inside the image at imagePath, an asset path of the same table.
+        public string spriteName;
+        public string imagePath;
+    }
+
+    [Serializable]
+    internal sealed class SpriteRectSpec
+    {
+        public string name;
+        public float x;
+        public float y;
+        public float width;
+        public float height;
+        public float pivotX;
+        public float pivotY;
+        public float borderLeft;
+        public float borderBottom;
+        public float borderRight;
+        public float borderTop;
+        public float pixelsPerUnit;
     }
 
     [Serializable]
@@ -149,14 +175,15 @@ namespace Uare.SceneBuilder.Editor
     internal static class SceneSpecReader
     {
         private const string Schema = "uare.scene-spec";
-        private const int Version = 2;
+        private const int Version = 3;
 
         private static readonly HashSet<string> RowKinds = new HashSet<string> { "number", "string", "arraySize", "ref" };
         private static readonly HashSet<string> ReferenceKinds = new HashSet<string> { "object", "asset", "null", "missing", "unresolved" };
         private static readonly HashSet<string> AssetKinds = new HashSet<string>
         {
-            SceneAssetImporter.FileKind, SceneAssetImporter.MaterialKind, SceneAssetImporter.ScriptableKind,
+            SceneAssetImporter.FileKind, SceneAssetImporter.MaterialKind, SceneAssetImporter.ScriptableKind, SceneAssetImporter.SpriteKind,
         };
+        private static readonly HashSet<string> SpriteModes = new HashSet<string> { "none", "single", "multiple" };
 
         // Extensions Unity imports as each copied class.
         private static readonly Dictionary<string, HashSet<string>> FileExtensions = new Dictionary<string, HashSet<string>>
@@ -203,9 +230,21 @@ namespace Uare.SceneBuilder.Editor
             foreach (var asset in spec.assets)
             {
                 ValidateAsset(spec.scene, asset);
-                if (!assetPaths.Add(asset.path) || !importPaths.Add(asset.importPath))
+                // A sprite entry names a sprite inside its image, so it shares the image's import path.
+                if (!assetPaths.Add(asset.path) || (asset.kind != SceneAssetImporter.SpriteKind && !importPaths.Add(asset.importPath)))
                 {
                     throw new SceneBuildException($"Scene spec lists an asset path twice; scene={spec.scene}, path={asset.path}, importPath={asset.importPath}");
+                }
+            }
+
+            var byPath = spec.assets.ToDictionary(a => a.path, StringComparer.Ordinal);
+            foreach (var sprite in spec.assets.Where(a => a.kind == SceneAssetImporter.SpriteKind))
+            {
+                if (!byPath.TryGetValue(sprite.imagePath ?? string.Empty, out var image) || image.kind != SceneAssetImporter.FileKind ||
+                    image.importPath != sprite.importPath || sprite.path != sprite.imagePath + "#" + sprite.spriteName ||
+                    image.sprites == null || image.sprites.Count(s => s.name == sprite.spriteName) != 1)
+                {
+                    throw new SceneBuildException($"Scene spec sprite does not name exactly one sprite of an image in the table; scene={spec.scene}, sprite={sprite.path}");
                 }
             }
 
@@ -284,9 +323,17 @@ namespace Uare.SceneBuilder.Editor
                 throw new SceneBuildException($"Scene spec asset has an unknown kind; scene={scene}, kind={asset.kind}, path={asset.path}");
             }
 
+            if (!SpriteModes.Contains(asset.spriteMode ?? string.Empty) || asset.sprites == null ||
+                (asset.spriteMode == "none") != (asset.sprites.Length == 0) || (asset.spriteMode == "single" && asset.sprites.Length != 1) ||
+                asset.sprites.Select(s => s.name).Distinct(StringComparer.Ordinal).Count() != asset.sprites.Length)
+            {
+                throw new SceneBuildException($"Scene spec image has an invalid sprite sheet; scene={scene}, path={asset.path}, mode={asset.spriteMode}");
+            }
+
             var extension = Path.GetExtension(asset.importPath).ToLowerInvariant();
             var importable = asset.kind == SceneAssetImporter.MaterialKind ? extension == ".mat"
                 : asset.kind == SceneAssetImporter.ScriptableKind ? extension == ".asset"
+                : asset.kind == SceneAssetImporter.SpriteKind ? asset.className == "Sprite" && extension == ".png"
                 : FileExtensions.TryGetValue(asset.className ?? string.Empty, out var extensions) && extensions.Contains(extension);
             if (!importable)
             {

@@ -14,7 +14,7 @@ Plugin này **hướng dẫn** AI agent qua quy trình tương tác: kéo APK t�
 
 Lệnh chạy là `scripts/uare` (Windows: `scripts\uare.cmd`). Chỉ cần Python 3.10 trở lên; mặc định chỉ dùng thư viện chuẩn. adb đã có sẵn trong `vendor/`.
 
-Muốn mở AssetBundle và giải mã texture/audio/mesh (chế độ "power"), cài thêm: `pip install "uare[power]"` (UnityPy + Pillow). Các tool ngoài (Il2CppDumper, Ghidra) không bắt buộc và không đi kèm; bạn trỏ tới chúng bằng `--dumper`/`--ghidra` hoặc tải vào `vendor/` bằng `fetch-tool`.
+Muốn mở AssetBundle và giải mã texture/audio/mesh (chế độ "power"), tạo môi trường `.venv-power` trong thư mục plugin với extra `power` như trong [hướng dẫn tool](agent-tools.md#plugin-root-wrapper-and-python-environment); `scripts/uare` tự dùng nó. Đừng chạy `pip install "uare[power]"`: tên gói của dự án là `unity-apk-re`, `uare` trên PyPI là gói khác. Các tool ngoài (Il2CppDumper, Ghidra) không bắt buộc và không đi kèm; bạn trỏ tới chúng bằng `--dumper`/`--ghidra` hoặc tải vào `vendor/` bằng `fetch-tool`.
 
 ## Quy trình chính (interactive workflow)
 
@@ -22,8 +22,11 @@ Khi user nói **"Rebuild game với package:com.example.game"**, agent sẽ:
 
 1. **ACQUIRE** -- Kéo APK từ điện thoại qua adb
 2. **EXTRACT & RE** -- Giải nén, phân tích, reverse engineering
-3. **CHECKPOINT** -- Báo cáo cho user: phiên bản Unity, scripting backend, inventory asset, tình trạng bảo vệ. **Hỏi user** muốn rebuild kiểu gì (local only / backend stubs / full) và tập trung vào phần nào (UI / logic / assets only)
-4. **REBUILD** -- Tạo Unity project dựa trên câu trả lời của user
+3. **DECRYPT** -- Nếu metadata bị bọc, `libil2cpp.so` bị pack hoặc DLL hot-update bị mã hoá thì chạy `recover-metadata` / `unpack-native` / `decrypt-hotdll`, không cần hỏi
+4. **BLUEPRINT & BEHAVIOR** -- Báo phiên bản Unity, scripting backend, inventory asset, tình trạng bảo vệ; phân tích scene, asset, script, hành vi có trích dẫn
+5. **REBUILD** -- Dựng từng scene vào project Unity của user (bước 12) hoặc tạo bản nháp cấu trúc, kèm danh sách blocker
+
+Không có checkpoint hỏi phạm vi: agent không dừng lại hỏi kiểu rebuild hay phần cần tập trung.
 
 Xem chi tiết: skill `/unity-apk-re:rebuild-game`
 
@@ -175,9 +178,9 @@ scripts/uare export-assets re/rollinghero/extracted --out re/rollinghero/assets
 
 **`members.tsv` là phần gom nhóm.** Range `methodStart/method_count`, `fieldStart/field_count`... nằm sẵn trong bảng `Il2CppTypeDefinition` của metadata, nên biết method/field nào thuộc class nào **không cần binary, không cần gỡ pack**. Type nào có range không khớp bảng thì bị bỏ qua (báo trong `ranges_skipped`), không đoán. Chữ ký kiểu (tham số/giá trị trả về), tên class cha/con/interface và địa chỉ hàm thì vẫn cần mảng `Il2CppType[]` trong `libil2cpp.so` — tức vẫn cần Il2CppDumper trên binary sạch.
 
-### Bước 8 (tuỳ chọn): gỡ lớp bọc — `recover-metadata` và `unpack-native`
+### Bước 8: gỡ lớp bọc — `recover-metadata` và `unpack-native`
 
-Mặc định công cụ **không** động vào game bọc/mã hoá: nó phát hiện và báo. Hai lệnh dưới đây là bước vượt ranh giới có chủ đích, bạn phải chạy tay:
+`run` chỉ phát hiện và báo lớp bọc/mã hoá. Khi `analyze` báo metadata bị bọc hoặc `.so` bị pack, chạy hai lệnh dưới đây (agent tự chạy, không cần hỏi):
 
 ```bash
 # metadata sai magic (bị XOR hoặc bọc): thử tự phục hồi
@@ -201,7 +204,7 @@ scripts/uare unpack-native .../libil2cpp.so --out re/rollinghero/unpacked --cmd 
 
 ### Bước 9: mở rộng khi binary **không** bị pack — enrich, decompile, UnityPy
 
-Ba bước này chỉ dùng cho build sạch (verdict `normal`), không vượt ranh giới nào:
+Các bước này dùng cho build sạch (verdict `normal`) hoặc sau khi đã gỡ lớp bọc ở bước 8:
 
 ```bash
 # RVA + chữ ký + dump.cs từ Il2CppDumper/Inspector (cần tool)
@@ -210,15 +213,14 @@ scripts/uare il2cpp-enrich re/rollinghero/extracted --out re/rollinghero/enriche
 
 # hoặc tải tool vào vendor/ rồi để tự dò
 scripts/uare fetch-tool --url https://github.com/Perfare/Il2CppDumper/releases/download/vX/Il2CppDumper.zip \
-    --dest vendor/il2cpp-dumper
+    --sha256 <sha256-của-bản-release> --dest vendor/il2cpp-dumper
 scripts/uare il2cpp-enrich re/rollinghero/extracted --out re/rollinghero/enriched
 
 # Ghidra headless: danh sách hàm + pseudo-C, địa chỉ khớp RVA ở bước trên
 scripts/uare decompile re/rollinghero/unpacked/libil2cpp.so --out re/rollinghero/ghidra \
     --ghidra /path/to/ghidra/support/analyzeHeadless
 
-# AssetBundle + texture/audio/mesh/Visual Scripting (cần pip install "uare[power]")
-pip install "uare[power]"
+# AssetBundle + texture/audio/mesh/Visual Scripting (cần extra power trong .venv-power, xem docs/agent-tools.md)
 scripts/uare export-assets re/rollinghero/extracted --out re/rollinghero/assets --backend unitypy
 
 # Cây thư mục chuẩn RE: asset phân loại + hierarchy + catalog + index
@@ -240,7 +242,7 @@ Kết quả:
 
 ### Bước 10: `package` — xuất đầy đủ asset
 
-`run` đã chạy bước này sau khi analyze, và ghi vào `<workdir>/extracted-assets/`. Cần UnityPy: `pip install "uare[power]"`. Nếu thiếu, `run` báo lỗi ngay trước khi kéo APK từ máy, không kéo dở rồi mới lỗi.
+`run` đã chạy bước này sau khi analyze, và ghi vào `<workdir>/extracted-assets/`. Cần UnityPy: extra `power` trong `.venv-power` (xem [hướng dẫn tool](agent-tools.md#plugin-root-wrapper-and-python-environment)). Nếu thiếu, `run` báo lỗi ngay trước khi kéo APK từ máy, không kéo dở rồi mới lỗi.
 
 Chạy riêng trên cây đã giải nén:
 
@@ -285,7 +287,7 @@ bản trong `shared/`. `zip` và `rsync` không có `-H` sẽ ghi mỗi link th�
 - Object nào không xuất được (texture placeholder 0×0, type tree lỗi...) đều ghi vào `catalog.json` kèm lý do, không bỏ im lặng.
 - `index.html` mở bằng trình duyệt để duyệt thẳng (ảnh có thumbnail).
 
-### Bước 11 (tuỳ chọn): giải mã DLL hot-update — `decrypt-hotdll`
+### Bước 11: giải mã DLL hot-update — `decrypt-hotdll`
 
 Game dùng **HybridCLR** (hoặc tương tự) mã hóa các assembly hot-update thành `MAGIC || ciphertext` và giấu key trong chính metadata AOT: trình biên dịch C# đặt các mảng `new byte[]{...}` vào class `<PrivateImplementationDetails>`, **tên field chính là SHA-256 của dữ liệu**, giá trị nằm trong blob `fieldAndParameterDefaultValueData` của `global-metadata.dat`.
 
@@ -294,7 +296,7 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
 ```
 
 - Công cụ gom **mọi mảng constant** từ metadata, **tự kiểm chứng từng mảng bằng SHA-256 lấy từ tên field** (không đoán), rồi thử lần lượt AES-128-CBC / AES-128-GCM / ChaCha20 / RC4 / XOR với các độ dài magic thường gặp. Một tổ hợp chỉ được chấp nhận khi **cả file nhỏ nhất giải ra đúng PE** (và padding PKCS#7 khớp với CBC); không tìm được thì báo lỗi, không đoán.
-- Không cần `libil2cpp.so` — key nằm hoàn toàn trong metadata. Không cần cài thêm gì (AES/RC4/ChaCha20 có bản thuần Python); cài `pip install "uare[crypto]"` để chạy nhanh hơn với pycryptodome.
+- Không cần `libil2cpp.so` — key nằm hoàn toàn trong metadata. Không cần cài thêm gì (AES/RC4/ChaCha20 có bản thuần Python); cài thêm extra `crypto` vào `.venv-power` (`"<plugin-root>[power,crypto]"`) để chạy nhanh hơn với pycryptodome.
 - Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`.
 - Nếu game dùng thuật toán riêng: đưa key trực tiếp qua `--algo --key --iv --magic`.
 
@@ -314,7 +316,7 @@ scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/s
 - Test: thêm `"testables": ["com.uare.scenebuilder"]` vào manifest. Test EditMode kiểm tra việc ghi property; test PlayMode chạy mọi scene trong `Assets` 120 frame và ghi kết quả vào `Logs/uare-playmode.jsonl`.
 - Spec v2 có thêm RenderSettings/LightmapSettings của từng scene, toàn bộ thuộc tính material đã lưu (texture kèm scale/offset, float, int, màu, keyword, render queue), thiết lập texture gốc (filter, wrap, mipmap, readable, Alpha8) và các asset ScriptableObject như font TMP, `SkeletonDataAsset`/`SpineAtlasAsset` của Spine, dựng lại từ chính field gốc khi project có script tương ứng. File text giữ tên TextAsset gốc; `.skel` thành `.skel.txt`, `.atlas` thành `.atlas.bytes`, vì bộ import của spine-unity tự xử lý `.skel.bytes`/`.atlas.txt` và có thể bật hộp thoại modal.
 - Thứ tự root: bản build không lưu thứ tự root của editor. Thử bằng bundle trên 2022.3 cho thấy Unity nạp root của scene đã build theo thứ tự path ID, nên thứ tự dựng lại (`rootOrderBasis: path_id`) chính là thứ tự game gốc thấy lúc chạy.
-- Mã game (chỉ khi người dùng cho phép giải mã rõ ràng): giải mã bằng `decrypt-hotdll`, chạy `il2cpp-enrich` để có stub DLL của các assembly AOT, copy DLL hot-update đã giải mã và các stub mà chúng tham chiếu vào project, rồi tắt Auto Reference cho tất cả (`isExplicitlyReferenced: 1`), nếu không một kiểu của game như `ObjectPool<T>` ở namespace toàn cục có thể làm hỏng biên dịch package. Stub DLL cần sửa hai chỗ để Editor nạp sạch: tham số kiểu trong attribute thiếu tên assembly, và kiểu `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` không có thân hàm. Builder khi đó gắn script vào kiểu hot-update thật, báo riêng script gắn vào stub (`stubBoundScripts`: có field gốc, không có logic gốc) và chỉ giữ placeholder cho kiểu không có.
+- Mã game: giải mã bằng `decrypt-hotdll` (bước 11), chạy `il2cpp-enrich` để có stub DLL của các assembly AOT, copy DLL hot-update đã giải mã và các stub mà chúng tham chiếu vào project, rồi tắt Auto Reference cho tất cả (`isExplicitlyReferenced: 1`), nếu không một kiểu của game như `ObjectPool<T>` ở namespace toàn cục có thể làm hỏng biên dịch package. Stub DLL cần sửa hai chỗ để Editor nạp sạch: tham số kiểu trong attribute thiếu tên assembly, và kiểu `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` không có thân hàm. Builder khi đó gắn script vào kiểu hot-update thật, báo riêng script gắn vào stub (`stubBoundScripts`: có field gốc, không có logic gốc) và chỉ giữ placeholder cho kiểu không có.
 - Dữ liệu Spine 3.8 cần spine-unity 3.8. Bản git của nó thiếu spine-csharp, nên cài dạng package nhúng: `spine-unity/Assets/Spine` cộng `spine-csharp/src` copy vào `Runtime/spine-csharp`.
 
 **`export-assets`** đọc mọi SerializedFile và xuất ra:

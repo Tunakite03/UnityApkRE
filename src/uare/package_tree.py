@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,8 @@ from uare.game_model import (FileRecord, ObjectRecord, Reference, closure, ident
                              save_model)
 from uare.model_capture import UnityObject, capture, group_objects, serialized_name
 from uare.outdir import staged_output
-from uare.unity import _SIGNATURE_SCAN, bundle_offset
+from uare.script_types import ScriptTypes, ScriptTypesError, load_script_types
+from uare.unity import _SIGNATURE_SCAN, FileKind, bundle_offset, detect_kind, read_serialized_header
 
 LOG = logging.getLogger("uare.package_tree")
 
@@ -119,6 +121,9 @@ class PackageResult:
     links: int
     most_links_per_file: int
     issues: tuple[str, ...]
+    # MonoBehaviour field coverage by model data status, and the assemblies that generated type trees.
+    mono_behaviours: dict[str, int]
+    script_assemblies: tuple[dict[str, str], ...]
 
 
 class PackageLinkError(UareError):
@@ -136,7 +141,7 @@ def require_unitypy() -> None:
             importlib.import_module(module)
         except ImportError as exc:
             raise UnityPyRequired(
-                f"the asset export needs {module} ({exc}); install it with `pip install 'uare[power]'`, "
+                f"the asset export needs {module} ({exc}); install the `power` extra into the plugin's `.venv-power` (see docs/agent-tools.md), "
                 "or set UARE_PYTHON to an interpreter that has it") from exc
 
 
@@ -507,8 +512,10 @@ def _link_limit(staging: Path) -> int:
 class _Packager:
     """Writes one output tree. Holds the staging directory, the catalog and the name registry."""
 
-    def __init__(self, unitypy: Any, root: Path, staging: Path) -> None:
+    def __init__(self, unitypy: Any, root: Path, staging: Path, script_types: ScriptTypes | None) -> None:
         self._unitypy = unitypy
+        self._script_types = script_types
+        self._mono_behaviours: Counter[str] = Counter()
         self._root = root
         self._staging = staging
         self._scratch = staging / ".scratch" / "bundle.bin"
@@ -559,7 +566,9 @@ class _Packager:
             hotdll=self._hotdll,
             scenes=tuple(sorted(folders[s.scope_id].rsplit("/", 1)[-1] for s in specs if s.kind == "scene")),
             errors=self._errors, prefabs=sum(1 for s in specs if s.kind == "prefab"), spines=self._spines,
-            links=links, most_links_per_file=most_links, issues=tuple(self._layout_issues))
+            links=links, most_links_per_file=most_links, issues=tuple(self._layout_issues),
+            mono_behaviours=dict(self._mono_behaviours),
+            script_assemblies=tuple(asdict(source) for source in self._script_types.loaded) if self._script_types else ())
         (write / "report.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False),
                                            encoding="utf-8")
         shutil.rmtree(self._staging / ".scratch", ignore_errors=True)
@@ -814,15 +823,20 @@ class _Packager:
         for obj in pending:
             self._record_pending(rel, obj, group, homed, hierarchy_output, failures)
         file_record, object_records = capture(rel, serialized, objs, exported)
+        self._mono_behaviours.update(r.data_status for r in object_records if r.class_name == "MonoBehaviour")
         self._model_files.append(file_record)
         self._model_objects.extend(object_records)
 
     def _open(self, path: Path, raw: bytes, offset: int | None) -> Any:
         if offset is None:
-            return self._unitypy.load(str(path))
-        self._scratch.parent.mkdir(parents=True, exist_ok=True)
-        self._scratch.write_bytes(raw[offset:])
-        return self._unitypy.load(str(self._scratch))
+            env = self._unitypy.load(str(path))
+        else:
+            self._scratch.parent.mkdir(parents=True, exist_ok=True)
+            self._scratch.write_bytes(raw[offset:])
+            env = self._unitypy.load(str(self._scratch))
+        if self._script_types is not None:
+            env.typetree_generator = self._script_types.generator
+        return env
 
     def _category(self, obj: Any, cls: str) -> str | None:
         if cls == "TextAsset":
@@ -918,17 +932,34 @@ q.oninput=render;render();});
 </script>"""
 
 
-def package(root: Path, out_dir: Path) -> PackageResult:
-    """Export every readable asset of an extracted Unity tree into `out_dir` (must not exist yet)."""
+def build_unity_version(layout: Layout, candidates: list[Path]) -> str:
+    """The player's Unity version, from globalgamemanagers or else the first serialized file."""
+    preferred = layout.data_dir / "globalgamemanagers"
+    for path in ([preferred] if preferred.is_file() else []) + candidates:
+        if detect_kind(path) == FileKind.SERIALIZED:
+            return read_serialized_header(path).unity_version
+    raise ScriptTypesError(f"No serialized file states the Unity version; root={layout.root}")
+
+
+def package(root: Path, out_dir: Path, script_assembly_dirs: Sequence[Path] = ()) -> PackageResult:
+    """Export every readable asset of an extracted Unity tree into `out_dir` (must not exist yet).
+
+    `script_assembly_dirs` supplies managed DLLs whose generated type trees decode MonoBehaviour fields.
+    """
     require_unitypy()
     unitypy = importlib.import_module("UnityPy")
     layout = resolve_layout(root)
     candidates = _candidates(layout)
+    script_types = (load_script_types(build_unity_version(layout, candidates), script_assembly_dirs)
+                    if script_assembly_dirs else None)
+    if script_types is not None:
+        event(LOG, logging.INFO, "script_types_loaded", unity_version=script_types.unity_version,
+              assemblies=len(script_types.loaded), rejected=len(script_types.rejected))
     with staged_output(out_dir) as staging:
         for sub in ("shared", "evidence", "scenes", "scripts/hotdll"):
             (staging / sub).mkdir(parents=True)
         _require_hard_links(staging)
-        packager = _Packager(unitypy, layout.root, staging)
+        packager = _Packager(unitypy, layout.root, staging, script_types)
         packager.run(candidates)
         result = packager.finish(layout.root)
     event(LOG, logging.INFO, "package_done", files=result.files, objects=result.objects,
@@ -948,6 +979,8 @@ def summarize(result: PackageResult) -> list[str]:
         f"spines            : {result.spines} folders under spines/",
         f"links             : {result.links} hard links; most links on one shared file = {result.most_links_per_file}",
         f"layout issues     : {len(result.issues)}",
+        "mono behaviours   : " + (", ".join(f"{k}={v}" for k, v in sorted(result.mono_behaviours.items())) or "none"),
+        f"script assemblies : {len(result.script_assemblies)} loaded for type-tree generation",
         "categories        : " + ", ".join(f"{k}={v}" for k, v in result.categories.items()),
         "model             : game_model.json (scoped identities, fields, resolved and missing references)",
         "index             : index.html (raw catalog); use `uare blueprint` for scene and system reports",

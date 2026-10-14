@@ -2,13 +2,15 @@
 
 The generic sibling of `fetch-adb`: `uare fetch-tool --url <archive> --dest vendor/<name>` streams
 an archive into a staging directory, verifies an optional sha256, and extracts it with the same
-guards used elsewhere (no absolute paths, no `..`, per-member and total size caps). A non-zip
-download is stored as a single file. Provenance lands in FETCHED.json.
+guards used elsewhere (no absolute paths, no `..`, per-member and total size caps). Tar archives
+(.tar.xz, .tar.gz) keep file modes and use the `data` extraction filter. Any other download is stored
+as a single file. Provenance lands in FETCHED.json.
 """
 
 import hashlib
 import json
 import logging
+import tarfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -79,6 +81,29 @@ def _safe_members(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     return zf.infolist()
 
 
+def _extract_tar(archive: Path, staging: Path, max_archive: int, max_member: int) -> dict[str, str]:
+    files: dict[str, str] = {}
+    with tarfile.open(archive) as tf:
+        members = tf.getmembers()
+        total = 0
+        for member in members:
+            name = Path(member.name)
+            if name.is_absolute() or ".." in name.parts:
+                raise ToolFetchError(f"archive member {member.name!r} escapes the destination")
+            total += member.size
+            if member.size > max_member or total > max_archive:
+                raise ToolFetchError(f"archive expands beyond the size cap at {member.name!r}")
+        try:
+            # The data filter refuses links out of the destination, device files and setuid bits.
+            tf.extractall(staging, filter="data")
+        except tarfile.FilterError as exc:
+            raise ToolFetchError(f"archive member rejected by the extraction filter: {exc}") from exc
+        for member in members:
+            if member.isfile():
+                files[member.name] = _sha256(staging / member.name)
+    return files
+
+
 def fetch_archive(url: str, dest: Path, *, expected_sha256: str | None = None, name: str | None = None,
                   context=None, max_archive: int = DEFAULT_MAX_ARCHIVE,
                   max_member: int = DEFAULT_MAX_MEMBER) -> ToolRecord:
@@ -109,6 +134,9 @@ def fetch_archive(url: str, dest: Path, *, expected_sha256: str | None = None, n
                         for chunk in iter(lambda: src.read(_CHUNK), b""):
                             out.write(chunk)
                     files[info.filename] = _sha256(target)
+            archive.unlink()
+        elif tarfile.is_tarfile(archive):
+            files = _extract_tar(archive, staging, max_archive, max_member)
             archive.unlink()
         else:
             stored = staging / (Path(url).name or "tool.bin")

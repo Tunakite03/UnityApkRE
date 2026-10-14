@@ -286,6 +286,44 @@ class PackageTests(unittest.TestCase):
                                          "m_Curve": [{"inSlope": {"$float": "-Infinity"}, "value": 0.5}],
                                          "m_Data": {"$float": "NaN"}})
 
+    def test_monobehaviour_without_type_tree_keeps_its_header_binding(self) -> None:
+        import struct
+        from uare.game_model import load_model
+        raw = (struct.pack("<iq", 0, 7) + b"\x01\x00\x00\x00" + struct.pack("<iq", 1, 3769)
+               + struct.pack("<i", 4) + b"Hero" + b"\x00" * 40)
+        behaviour = _Obj("MonoBehaviour", 8, "", _Pay())
+        behaviour.read = mock.Mock(side_effect=ValueError("Expected to read 356 bytes"))
+        behaviour.get_raw_data = lambda: raw
+        behaviour.reader = _Pay(endian="<")
+        behaviour.assets_file = _Pay(name="level3", externals=[], header=_Pay(version=22))
+        ENVS[b"sprite"] = [behaviour]
+        _result, out = self._package()
+        captured = load_model(out / "game_model.json").objects[0]
+        self.assertEqual(captured.data_status, "partial")
+        self.assertEqual(captured.data, {"m_GameObject": {"m_FileID": 0, "m_PathID": 7}, "m_Enabled": 1,
+                                         "m_Script": {"m_FileID": 1, "m_PathID": 3769}, "m_Name": "Hero"})
+
+    def test_script_types_are_attached_to_every_opened_environment(self) -> None:
+        from uare.script_types import ScriptTypes
+        generator = object()
+        script_types = ScriptTypes(generator, "6000.2.15f1", (), ())
+        envs: list = []
+        original = _load
+
+        def recording_load(path):
+            env = original(path)
+            envs.append(env)
+            return env
+
+        sys.modules["UnityPy"].load = recording_load
+        with mock.patch.object(pt, "load_script_types", return_value=script_types) as loader, \
+                mock.patch.object(pt, "build_unity_version", return_value="6000.2.15f1"):
+            result = pt.package(self.data, self.tmp / "out", [self.tmp])
+        loader.assert_called_once_with("6000.2.15f1", [self.tmp])
+        self.assertTrue(envs)
+        self.assertTrue(all(env.typetree_generator is generator for env in envs))
+        self.assertEqual(result.mono_behaviours, {"complete": 1})
+
     def test_run_fails_before_pulling_when_unitypy_missing(self) -> None:
         sys.modules["UnityPy"] = None
         workdir = self.tmp / "work"

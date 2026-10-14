@@ -7,8 +7,9 @@ allowed-tools: Read, Bash
 
 # Capture runtime Unity logs from a connected Android device
 
-Wrapper: `scripts/uare logcat` (at repository root).
-Direct adb command: run in user terminal outside sandboxes.
+Use the wrapper first: `"${CLAUDE_PLUGIN_ROOT}/scripts/uare" logcat` (section B). It resolves adb
+and selects the device. Use the raw commands in section A only when the sandbox blocks the adb
+server socket or USB; then give the user the exact command to run in their own terminal.
 
 ## 1. Understanding `adb` flags & Unity logging
 
@@ -18,36 +19,43 @@ Direct adb command: run in user terminal outside sandboxes.
 
 ## 2. Standard commands
 
-### A. Raw terminal commands (run in your terminal)
+### A. Raw terminal commands (for the user's own terminal)
+
+Use the plugin's adb so the user does not need one on PATH (`linux` or `windows\adb.exe` on
+other hosts):
+
+```bash
+ADB="${CLAUDE_PLUGIN_ROOT}/vendor/platform-tools/darwin/adb"
+```
 
 1. **Clear buffer before starting a test run**:
    ```bash
-   adb logcat -c
+   "$ADB" logcat -c
    ```
 2. **Stream full logs to file (Ctrl+C to stop)**:
    ```bash
-   adb logcat -b all -v threadtime > unity_full.log
+   "$ADB" logcat -b all -v threadtime > unity_full.log
    ```
 3. **Dump buffered logs non-interactively (without streaming)**:
    ```bash
-   adb logcat -b all -v threadtime -d > unity_dump.log
+   "$ADB" logcat -b all -v threadtime -d > unity_dump.log
    ```
 4. **Post-analysis filtering (search for key game & subsystem events)**:
    ```bash
-   grep -iE "unity|firebase|perbase|crash|exception" unity_full.log
+   grep -iE "unity|firebase|crash|exception|fatal" unity_full.log
    ```
 5. **Quick tag-only inspection**:
    ```bash
-   adb logcat -v time -s Unity
+   "$ADB" logcat -v time -s Unity
    ```
 6. **Full device diagnostic snapshot (deep troubleshooting)**:
    ```bash
-   adb bugreport bugreport.zip
+   "$ADB" bugreport bugreport.zip
    ```
 
 ### B. Toolkit CLI commands (`scripts/uare logcat`)
 
-The CLI automatically handles ADB binary resolution (`UARE_ADB`, vendored platform-tools, PATH) and device selection:
+The CLI automatically handles ADB binary resolution (`UARE_ADB`, vendored platform-tools, PATH) and device selection. Below, `scripts/uare` means `"${CLAUDE_PLUGIN_ROOT}/scripts/uare"`:
 
 ```bash
 # Clear device logcat ring buffer
@@ -57,7 +65,7 @@ scripts/uare logcat -c
 scripts/uare logcat --dump --out <workdir>/observations/unity_dump.log
 
 # Dump and filter immediately via regex
-scripts/uare logcat --dump --grep "unity|firebase|perbase|crash|exception"
+scripts/uare logcat --dump --grep "unity|firebase|crash|exception|fatal"
 
 # Stream full logs to file and print matches to terminal
 scripts/uare logcat --follow --out <workdir>/observations/unity_stream.log --grep "unity|crash"
@@ -76,7 +84,7 @@ scripts/uare logcat --unity-only --dump
 
 ## 4. Recording evidence for game reconstruction
 
-Extract facts into `<workdir>/observations.json` following `skills/rebuild-game/SKILL.md`:
+Extract facts into `<workdir>/observations.json` following `../rebuild-game/SKILL.md` (each entry needs `scope_id`, `action`, `result`, `evidence` pointing at the saved log file):
 - Engine version: `Initialize engine version: 2022.3.10f1`
 - Scene transition markers: `[SceneManager] LoadScene Level1`, `Loading scene ...`
 - Asset bundle / Addressable download URLs: `DownloadHandlerAssetBundle`, `UnityWebRequest`

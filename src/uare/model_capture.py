@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+import struct
 from collections import defaultdict
 from pathlib import Path
 from typing import Protocol
@@ -59,7 +60,36 @@ def _pointer(value: object) -> dict[str, Json]:
             "m_PathID": int(getattr(value, "m_PathID", getattr(value, "path_id", 0)))}
 
 
+def _monobehaviour_header(obj: object) -> dict[str, Json]:
+    """Read the fixed MonoBehaviour prefix when no type tree describes the script's own fields.
+
+    Layout for serialized format >= 14: PPtr m_GameObject (int32 file, int64 path), UInt8 m_Enabled
+    aligned to 4, PPtr m_Script, then the m_Name string (int32 length + UTF-8 bytes).
+    """
+    version = int(getattr(getattr(getattr(obj, "assets_file"), "header"), "version"))
+    if version < 14:
+        raise NotImplementedError(f"MonoBehaviour header layout for serialized format {version}")
+    raw = bytes(getattr(obj, "get_raw_data")())
+    if len(raw) < 32:
+        raise ValueError(f"MonoBehaviour data shorter than its header; size={len(raw)}")
+    if raw[12] > 1 or raw[13:16] != b"\x00\x00\x00":
+        # Editor-layout objects start with extra fields; refuse rather than mis-read a binding.
+        raise ValueError("MonoBehaviour data does not match the release header layout")
+    endian = "<" if getattr(getattr(obj, "reader"), "endian") == "<" else ">"
+    go_file, go_path = struct.unpack_from(endian + "iq", raw, 0)
+    script_file, script_path = struct.unpack_from(endian + "iq", raw, 16)
+    (name_length,) = struct.unpack_from(endian + "i", raw, 28)
+    if not 0 <= name_length <= len(raw) - 32:
+        raise ValueError(f"MonoBehaviour name length exceeds object data; length={name_length}")
+    return {"m_GameObject": {"m_FileID": go_file, "m_PathID": go_path}, "m_Enabled": raw[12],
+            "m_Script": {"m_FileID": script_file, "m_PathID": script_path},
+            "m_Name": raw[32:32 + name_length].decode("utf-8")}
+
+
 def _fallback(obj: object, cls: str) -> dict[str, Json]:
+    if cls == "MonoBehaviour":
+        # UnityPy's typed read needs the script's type tree too; the header alone keeps the binding.
+        return _monobehaviour_header(obj)
     data = getattr(obj, "read")()
     if cls == "MonoScript":
         return {key: str(getattr(data, key)) for key in ("m_ClassName", "m_Namespace", "m_AssemblyName")}
@@ -81,8 +111,6 @@ def _fallback(obj: object, cls: str) -> dict[str, Json]:
                 vector = getattr(data, key)
                 result[key] = {axis: _value(float(getattr(vector, axis))) for axis in "xyzw" if hasattr(vector, axis)}
         return result
-    if cls == "MonoBehaviour":
-        return {key: _pointer(getattr(data, key)) for key in ("m_Script", "m_GameObject") if hasattr(data, key)}
     return {}
 
 

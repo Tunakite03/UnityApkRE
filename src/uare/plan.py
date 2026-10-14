@@ -74,7 +74,7 @@ def build_plan(package: str, workdir: Path, prerequisites: Prerequisites) -> Pla
     if prerequisites.missing_modules:
         blockers.append("UnityPy extra missing (needed by the package step): "
                         + ", ".join(prerequisites.missing_modules)
-                        + "; run `pip install 'uare[power]'` or set UARE_PYTHON to an interpreter that has it")
+                        + "; install the `power` extra into the plugin's `.venv-power` (see docs/agent-tools.md) or set UARE_PYTHON to an interpreter that has it")
     if prerequisites.workdir_state == "populated":
         blockers.append(f"workdir {wd} is not empty; use a new directory, outputs are never overwritten")
     checks = (

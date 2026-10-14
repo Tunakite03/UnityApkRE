@@ -40,7 +40,8 @@ namespace Uare.SceneBuilder.Editor.Tests
                 pixelsPerUnit = 100, pivotX = 0.5f, pivotY = 0.5f, filterMode = -1, wrapU = -1, wrapV = -1, shaderName = "", renderQueue = -1,
                 keywords = Array.Empty<string>(), textures = Array.Empty<MaterialTextureSpec>(), floats = Array.Empty<NamedValueSpec>(),
                 ints = Array.Empty<NamedValueSpec>(), colors = Array.Empty<NamedColorSpec>(), scriptClass = "", scriptNamespace = "",
-                scriptAssembly = "", props = Array.Empty<PropertySpec>(),
+                scriptAssembly = "", props = Array.Empty<PropertySpec>(), spriteMode = "none", sprites = Array.Empty<SpriteRectSpec>(),
+                spriteName = "", imagePath = "",
             };
         }
 
@@ -111,6 +112,58 @@ namespace Uare.SceneBuilder.Editor.Tests
         }
 
         [Test]
+        public void MultipleSheetCutsNamedSpritesWithTheirPivotAndBorder()
+        {
+            var path = WritePng(Folder + "/Sheet.png", 64, 32);
+            var spec = Entry("Texture2D", "shared/Sheet.png");
+            spec.spriteMode = "multiple";
+            spec.pixelsPerUnit = 64;
+            spec.sprites = new[]
+            {
+                new SpriteRectSpec { name = "left", width = 32, height = 32, pivotX = 0.5f, borderLeft = 4, borderBottom = 3, borderRight = 2, borderTop = 1, pixelsPerUnit = 64 },
+                new SpriteRectSpec { name = "right", x = 32, width = 32, height = 32, pivotX = 0.5f, pivotY = 0.5f, pixelsPerUnit = 64 },
+            };
+
+            SceneAssetImporter.ConfigureImporter(spec, path, true, new SceneBuildReport());
+
+            var sprites = AssetDatabase.LoadAllAssetsAtPath(path).OfType<Sprite>().ToDictionary(s => s.name);
+            CollectionAssert.AreEquivalent(new[] { "left", "right" }, sprites.Keys);
+            Assert.AreEqual(new Vector4(4, 3, 2, 1), sprites["left"].border);
+            Assert.AreEqual(new Vector2(16, 0), sprites["left"].pivot);
+            Assert.AreEqual(new Rect(32, 0, 32, 32), sprites["right"].rect);
+            Assert.AreEqual(64f, sprites["right"].pixelsPerUnit);
+            var again = new SceneBuildReport();
+            SceneAssetImporter.ConfigureImporter(spec, path, false, again);
+            Assert.IsEmpty(again.importerDifferences, "the same sheet on an existing image must not be reported as a difference");
+        }
+
+        [Test]
+        public void SingleSpriteImageTakesPivotAndBorderFromItsSheet()
+        {
+            var path = WritePng(Folder + "/Button.png", 32, 32);
+            var spec = Entry("Texture2D", "shared/Button.png");
+            spec.spriteMode = "single";
+            spec.pixelsPerUnit = 50;
+            spec.sprites = new[] { new SpriteRectSpec { name = "btn", width = 32, height = 32, pivotX = 0.5f, borderLeft = 12, borderBottom = 13, borderRight = 11, borderTop = 10, pixelsPerUnit = 50 } };
+
+            SceneAssetImporter.ConfigureImporter(spec, path, true, new SceneBuildReport());
+
+            var sprite = AssetDatabase.LoadAssetAtPath<Sprite>(path);
+            Assert.AreEqual(new Vector4(12, 13, 11, 10), sprite.border);
+            Assert.AreEqual(new Vector2(16, 0), sprite.pivot);
+            Assert.AreEqual(50f, sprite.pixelsPerUnit);
+            Assert.AreEqual(SpriteMeshType.FullRect, ((TextureImporter)AssetImporter.GetAtPath(path)).spriteImportMode == SpriteImportMode.Single
+                ? GetMeshType(path) : SpriteMeshType.Tight);
+        }
+
+        private static SpriteMeshType GetMeshType(string path)
+        {
+            var settings = new TextureImporterSettings();
+            ((TextureImporter)AssetImporter.GetAtPath(path)).ReadTextureSettings(settings);
+            return settings.spriteMeshType;
+        }
+
+        [Test]
         public void SingleChannelOriginalImportsAsAlpha8()
         {
             var path = WritePng(Folder + "/Atlas.png", 64, 64);
@@ -130,7 +183,7 @@ namespace Uare.SceneBuilder.Editor.Tests
             File.WriteAllText(Path.Combine(_sourceRoot, "shared", "Broken.png"), "not an image");
             var spec = new SceneSpec
             {
-                schema = "uare.scene-spec", version = 2, scene = "UareRollbackProbe", scopeId = "test", originalPath = "", source = "", serializedFile = "",
+                schema = "uare.scene-spec", version = 3, scene = "UareRollbackProbe", scopeId = "test", originalPath = "", source = "", serializedFile = "",
                 sourceRoot = _sourceRoot, rootOrderBasis = "path_id", tags = Array.Empty<string>(), layers = Array.Empty<string>(),
                 sortingLayers = SortingLayer.layers.Select(layer => new SortingLayerSpec { name = layer.name, uniqueId = (uint)layer.id }).ToArray(),
                 gameObjects = Array.Empty<GameObjectSpec>(), sceneSettings = Array.Empty<SceneSettingSpec>(),

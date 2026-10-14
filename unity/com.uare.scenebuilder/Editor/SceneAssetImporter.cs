@@ -23,6 +23,7 @@ namespace Uare.SceneBuilder.Editor
         public const string FileKind = "file";
         public const string MaterialKind = "material";
         public const string ScriptableKind = "scriptable";
+        public const string SpriteKind = "sprite";
         private const string SpriteRenderShader = "Universal Render Pipeline/2D/Sprite-Unlit-Default";
         private const string UiShader = "UI/Default";
         private static Dictionary<string, List<Type>> _scriptableTypes;
@@ -31,6 +32,11 @@ namespace Uare.SceneBuilder.Editor
         {
             foreach (var asset in spec.assets)
             {
+                if (asset.kind == SpriteKind)
+                {
+                    continue; // a sprite inside an image of the same table
+                }
+
                 var projectPath = ProjectPath(assetsFolder, asset);
                 var destination = Path.Combine(projectRoot, projectPath);
                 if (asset.kind == FileKind)
@@ -94,6 +100,8 @@ namespace Uare.SceneBuilder.Editor
                 loaded[asset.path] = Load(asset, projectPath);
             }
 
+            LoadSprites(spec, assetsFolder, loaded);
+
             foreach (var material in spec.assets.Where(a => a.kind == MaterialKind))
             {
                 loaded[material.path] = CreateMaterial(material, projectRoot, ProjectPath(assetsFolder, material), loaded, report, created);
@@ -104,7 +112,7 @@ namespace Uare.SceneBuilder.Editor
 
             // Saving can reimport the new assets and replace the in-memory objects created above, which then read as
             // destroyed. The scene is wired to the assets as they are now on disk.
-            foreach (var asset in spec.assets.Where(a => a.kind != FileKind && !withoutScript.Contains(a.path)))
+            foreach (var asset in spec.assets.Where(a => a.kind != FileKind && a.kind != SpriteKind && !withoutScript.Contains(a.path)))
             {
                 var projectPath = ProjectPath(assetsFolder, asset);
                 var current = asset.kind == MaterialKind
@@ -118,7 +126,29 @@ namespace Uare.SceneBuilder.Editor
                 loaded[asset.path] = current;
             }
 
+            LoadSprites(spec, assetsFolder, loaded);
             return loaded;
+        }
+
+        // Each sprite entry resolves to the one sprite of its image with the spec's name; a single-sprite image has
+        // exactly one sprite, which Unity names after the file.
+        private static void LoadSprites(SceneSpec spec, string assetsFolder, Dictionary<string, Object> loaded)
+        {
+            var byPath = spec.assets.ToDictionary(a => a.path, StringComparer.Ordinal);
+            foreach (var sprite in spec.assets.Where(a => a.kind == SpriteKind))
+            {
+                var image = byPath[sprite.imagePath];
+                var projectPath = ProjectPath(assetsFolder, image);
+                var sprites = AssetDatabase.LoadAllAssetsAtPath(projectPath).OfType<Sprite>().ToList();
+                var found = image.spriteMode == "single" ? sprites : sprites.Where(s => s.name == sprite.spriteName).ToList();
+                if (found.Count != 1)
+                {
+                    throw new SceneBuildException(
+                        $"Image does not hold exactly one sprite for the spec; path={projectPath}, sprite={sprite.spriteName}, found={found.Count}");
+                }
+
+                loaded[sprite.path] = found[0];
+            }
         }
 
         private static HashSet<string> CreateScriptables(SceneSpec spec, string projectRoot, string assetsFolder, Dictionary<string, Object> loaded,
@@ -289,18 +319,32 @@ namespace Uare.SceneBuilder.Editor
             var settings = new TextureImporterSettings();
             importer.ReadTextureSettings(settings);
             var platform = importer.GetDefaultPlatformTextureSettings();
-            var current = Describe(settings, platform);
-            if (asset.className == "Sprite")
+            var current = Describe(settings, platform) + SpriteSheet.Describe(importer);
+            if (asset.className == "Sprite" || asset.spriteMode == "single")
             {
-                var border = new Vector4(asset.borderLeft, asset.borderBottom, asset.borderRight, asset.borderTop);
+                // A legacy cropped sprite carries its settings itself; a single-sprite image carries them in its sheet.
+                var single = asset.className == "Sprite" ? null : asset.sprites[0];
+                var border = single == null
+                    ? new Vector4(asset.borderLeft, asset.borderBottom, asset.borderRight, asset.borderTop)
+                    : new Vector4(single.borderLeft, single.borderBottom, single.borderRight, single.borderTop);
                 settings.textureType = TextureImporterType.Sprite;
                 settings.spriteMode = (int)SpriteImportMode.Single;
                 settings.spritePixelsPerUnit = asset.pixelsPerUnit;
                 settings.spriteAlignment = (int)SpriteAlignment.Custom;
-                settings.spritePivot = new Vector2(asset.pivotX, asset.pivotY);
+                settings.spritePivot = single == null ? new Vector2(asset.pivotX, asset.pivotY) : new Vector2(single.pivotX, single.pivotY);
                 settings.spriteBorder = border;
                 // A sliced or tiled sprite needs a full-rect mesh; Unity warns and draws it wrongly otherwise.
                 settings.spriteMeshType = border == Vector4.zero ? SpriteMeshType.Tight : SpriteMeshType.FullRect;
+                settings.alphaIsTransparency = true;
+            }
+            else if (asset.spriteMode == "multiple")
+            {
+                settings.textureType = TextureImporterType.Sprite;
+                settings.spriteMode = (int)SpriteImportMode.Multiple;
+                settings.spritePixelsPerUnit = asset.pixelsPerUnit;
+                settings.spriteMeshType = asset.sprites.Any(s => s.borderLeft + s.borderBottom + s.borderRight + s.borderTop > 0)
+                    ? SpriteMeshType.FullRect
+                    : SpriteMeshType.Tight;
                 settings.alphaIsTransparency = true;
             }
 
@@ -338,7 +382,7 @@ namespace Uare.SceneBuilder.Editor
             }
 
             platform.maxTextureSize = maxSize;
-            var wanted = Describe(settings, platform);
+            var wanted = Describe(settings, platform) + SpriteSheet.Describe(asset);
             if (wanted == current)
             {
                 return;
@@ -352,6 +396,11 @@ namespace Uare.SceneBuilder.Editor
 
             importer.SetTextureSettings(settings);
             importer.SetPlatformTextureSettings(platform);
+            if (asset.spriteMode == "multiple")
+            {
+                SpriteSheet.Write(importer, asset.sprites);
+            }
+
             importer.SaveAndReimport();
             report.importersConfigured++;
         }
@@ -443,6 +492,11 @@ namespace Uare.SceneBuilder.Editor
         public static Material Create(AssetSpec spec, Shader shader, bool substituted, IReadOnlyDictionary<string, Object> loaded, SceneBuildReport report)
         {
             var material = new Material(shader) { name = spec.name };
+            foreach (var dropped in spec.droppedProperties ?? System.Array.Empty<string>())
+            {
+                report.materialPropertiesDropped.Add($"{spec.importPath}: {dropped}");
+            }
+
             foreach (var texture in spec.textures)
             {
                 if (!material.HasProperty(texture.name))

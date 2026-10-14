@@ -7,11 +7,13 @@ allowed-tools: Read, Glob, Grep, Bash
 
 # Operate and test uare without touching a device
 
-The default for an agent is to **describe and verify**, not to run the pipeline. Pulling from a
-phone, writing a new work directory and exporting assets are actions the user has to ask for
-explicitly. This skill gives the agent the plan, the offline checks and the verification steps.
+This skill plans, tests and verifies; it does not run the pipeline. When the user asks to
+analyze or rebuild a game, use the `analyze-apk` or `rebuild-game` skill instead, which run the
+pipeline without a separate confirmation.
 
-Resolve the wrapper relative to this skill directory: `scripts/uare` and `scripts/run-tests` at the plugin root.
+Call the scripts by full path: `"${CLAUDE_PLUGIN_ROOT}/scripts/uare"` and
+`"${CLAUDE_PLUGIN_ROOT}/scripts/run-tests"` (in a checkout, the repository root). Below,
+`scripts/...` means those paths.
 
 ## 1. Plan before running
 
@@ -26,7 +28,7 @@ Read the JSON and report:
 
 - `ready`: `false` means `blockers` lists what to fix first. Quote the blocker text.
 - `steps[].needs_device`: only `pull` needs a phone. Do not run it unless the user asked for it.
-- `steps[].needs_unitypy`: `package` needs the `power` extra. Install with `pip install "uare[power]"`, or point `UARE_PYTHON` at an interpreter that has it.
+- `steps[].needs_unitypy`: `package` needs the `power` extra. Create `<plugin-root>/.venv-power` as described in [the tool guide](../../docs/agent-tools.md) (the wrapper uses it automatically), or point `UARE_PYTHON` at an interpreter that has it. Never `pip install uare[...]`: that is a different PyPI package.
 - `steps[].command` and `steps[].writes`: the exact command for each step and the output it produces.
 
 If `ready` is `true` and the user did not ask to pull, stop here and present the plan.
@@ -38,7 +40,8 @@ scripts/run-tests
 ```
 
 The suite uses fake UnityPy, Pillow and fmod_toolkit modules, so it runs on a plain Python 3.10+
-interpreter. Expected result: `OK` with `skipped=1`. The skipped test is the real-data smoke test.
+interpreter. Expected result: `OK`. Skips are expected for the real-data smoke test and for tests
+that need real UnityPy/Pillow; report the actual `skipped=` count and their reasons (`-v`).
 
 To include it after an analysis of a real build:
 
@@ -46,13 +49,15 @@ To include it after an analysis of a real build:
 UARE_REAL_DATA_DIR=<workdir>/extracted/Data scripts/run-tests
 ```
 
-Expected result: `OK` with no skip. Use `UARE_PYTHON` to pick the interpreter.
+Expected result: `OK`, with the real-data smoke test no longer skipped. Use `UARE_PYTHON` to pick
+the interpreter.
 
 ## 3. Verify an existing output (no re-run)
 
 These checks read files that already exist. They do not run the pipeline.
 
-- `manifest.json` at the work directory root: `status` must be `complete`, or `partial` with `status_reason` that the user accepts. `failed` names the stage in `stages[].error`. `scope.decrypted` and `scope.decompiled` are always empty.
+- `manifest.json` at the work directory root: `status` must be `complete`, or `partial` with `status_reason` that the user accepts. `failed` names the stage in `stages[].error`. `scope.decrypted` and `scope.decompiled` are empty because `run` itself never decrypts; decryption
+runs as separate commands with their own outputs (`recovery.json`, `keys.json`, `report.json`).
 - `manifest.json` `outputs[].sha256`: recompute the hash of each listed file and compare. A mismatch means the file changed after the run.
 
 - `report.json` in the analysis directory: `scripts/uare summary <workdir>/analysis` prints the summary.
@@ -88,18 +93,19 @@ The path in quotes is the first argument; replace `<workdir>` with the work dire
 | Error | Meaning | What to tell the user |
 |---|---|---|
 | `DeviceSelectionError` | no phone, or several phones without `--serial` | connect the phone, authorise USB debugging, or pass `--serial` |
-| `UnityPyRequired` | the package step cannot import UnityPy, Pillow or fmod_toolkit | `pip install "uare[power]"` or set `UARE_PYTHON` |
+| `UnityPyRequired` | the package step cannot import UnityPy, Pillow or fmod_toolkit | create `<plugin-root>/.venv-power` ([tool guide](../../docs/agent-tools.md)) or set `UARE_PYTHON` |
 | `OutputDirectoryError` | the output directory is not empty | use a new directory; outputs are never overwritten |
 | `PlatformToolsError` | no usable adb | `scripts/uare fetch-adb`, or set `UARE_ADB` |
 
 ## Rules for an agent
 
-- Do not run `pull` or `run` against a device unless the user asked for it in this conversation.
+- Within this skill, do not run `pull` or `run` against a device; the analysis skills do that.
 - Reuse an existing capture for follow-up analysis; each producing command needs
   a new or empty output directory. A fresh `run` requires a new workspace. Do not
   create another competing game root just to retry one stage. See
   [workspace and tool guidance](../../docs/agent-tools.md).
-- Do not decrypt, patch or re-sign anything. Hot-update assemblies stay as stored; the toolkit does not decrypt them.
+- Decryption (`recover-metadata`, `unpack-native`, `decrypt-hotdll`) is allowed; verify its outputs
+  like any other stage. The toolkit never patches, re-signs or reinstalls a build.
 - Report exactly what the command printed, including errors. Do not claim a check passed unless you ran it.
 
 ## Reconstruction verification

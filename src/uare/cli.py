@@ -229,7 +229,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         run.stage("extract", lambda: extract_apk_set(_archives_in(pull_dir), extract_dir))
         report = run.stage("analyze", lambda: analyze(extract_dir, analysis_dir))
         print("\n".join(summarize(asdict(report))))
-        result = run.stage("package", lambda: package(extract_dir, assets_dir))
+        result = run.stage("package", lambda: package(extract_dir, assets_dir,
+                                                      [Path(p) for p in args.script_assemblies]))
         print("\n".join(summarize_package(result)))
         from uare.blueprint import blueprint
         reconstructed = run.stage("blueprint", lambda: blueprint(workdir, workdir / "blueprint", assets_dir))
@@ -387,6 +388,24 @@ def cmd_decompile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_assetripper(args: argparse.Namespace) -> int:
+    from uare.assetripper import DEFAULT_VENDOR_ROOT as ASSETRIPPER_VENDOR_ROOT
+    from uare.assetripper import export_project, resolve_assetripper
+    from uare.assetripper import summarize as summarize_assetripper
+    tool = resolve_assetripper(args.assetripper, os.environ, ASSETRIPPER_VENDOR_ROOT, _path_lookup)
+    result = export_project(Path(args.root), Path(args.out), tool, timeout=args.timeout)
+    print("\n".join(summarize_assetripper(result)))
+    return 0
+
+
+def cmd_assetripper_remap(args: argparse.Namespace) -> int:
+    from uare.assetripper_remap import remap
+    from uare.assetripper_remap import summarize as summarize_remap
+    result = remap(Path(args.export), Path(args.assets), Path(args.out))
+    print("\n".join(summarize_remap(result)))
+    return 0
+
+
 def cmd_blueprint(args: argparse.Namespace) -> int:
     from uare.blueprint import blueprint
     result = blueprint(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets)
@@ -395,7 +414,7 @@ def cmd_blueprint(args: argparse.Namespace) -> int:
 
 
 def cmd_package(args: argparse.Namespace) -> int:
-    result = package(Path(args.root), Path(args.out))
+    result = package(Path(args.root), Path(args.out), [Path(p) for p in args.script_assemblies])
     print("\n".join(summarize_package(result)))
     return 0
 
@@ -508,6 +527,12 @@ def cmd_find(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_script_assemblies(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--script-assemblies", action="append", default=[], metavar="DIR",
+                        help="directory of managed DLLs (engine modules, BCL, UGUI/TMP and other packages) used to "
+                             "generate MonoBehaviour type trees; repeatable, earlier directories win on name clashes")
+
+
 def _add_adb_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--serial", help="device serial (required when several devices are connected)")
     parser.add_argument("--adb", help="adb binary (default: UARE_ADB, then vendored, then PATH)")
@@ -545,7 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("package", nargs="?", help="optional package name to filter by PID")
     p.add_argument("-b", "--buffer", default="all", help="logcat buffer to read (default: %(default)s; e.g. main,system,crash,all)")
     p.add_argument("--format", default="threadtime", help="log output format (default: %(default)s)")
-    p.add_argument("-g", "--grep", help="regex pattern to filter lines (e.g. 'unity|firebase|perbase|crash|exception')")
+    p.add_argument("-g", "--grep", help="regex pattern to filter lines (e.g. 'unity|firebase|crash|exception|fatal')")
     p.add_argument("--unity-only", action="store_true", help="filter only Unity tag (Unity:V *:S)")
     p.add_argument("--tags", help="comma-separated tags (e.g. 'Unity:V,CRASH:V')")
     p.add_argument("-c", "--clear", action="store_true", help="clear logcat buffer first")
@@ -575,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_adb_options(p)
     p.add_argument("package")
     p.add_argument("--workdir", required=True, help="directory that will hold pull/, extracted/, analysis/")
+    _add_script_assemblies(p)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("plan", help="dry run: list the steps, commands, outputs and missing prerequisites; touches nothing")
@@ -621,13 +647,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=7200.0, help="Ghidra timeout (s)")
     p.set_defaults(func=cmd_decompile)
 
+    p = sub.add_parser("assetripper", help="export native Unity assets (prefabs, clips, controllers, sprite sheets) "
+                                           "with a vendored AssetRipper, headless")
+    p.add_argument("root", help="extracted tree (Data/ and lib/<abi>/)")
+    p.add_argument("--out", required=True, help="empty directory for export/, assetripper.log and report.json")
+    p.add_argument("--assetripper", help="AssetRipper.GUI.Free (default: UARE_ASSETRIPPER, vendored, PATH)")
+    p.add_argument("--timeout", type=float, default=7200.0, help="timeout for loading and for exporting (s)")
+    p.set_defaults(func=cmd_assetripper)
+
+    p = sub.add_parser("assetripper-remap", help="match an AssetRipper export to source objects by content and "
+                                                 "restore original asset GUIDs in a copy")
+    p.add_argument("export", help="output directory of `uare assetripper`")
+    p.add_argument("--assets", required=True, help="package output folder (game_model.json and exported media)")
+    p.add_argument("--out", required=True, help="empty directory for project/, mapping.json and report.json")
+    p.set_defaults(func=cmd_assetripper_remap)
+
     p = sub.add_parser("package", help="capture scoped game model and export media, hierarchy and raw catalog (needs UnityPy)")
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for shared/, scenes/, prefabs/, spines/, evidence/, scripts/, catalog.json ...")
+    _add_script_assemblies(p)
     p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("fetch-tool", help="download + unpack an external tool archive into vendor/")
-    p.add_argument("--url", required=True, help="archive URL (zip, or a single-file download)")
+    p.add_argument("--url", required=True, help="archive URL (zip, tar.xz/tar.gz, or a single-file download)")
     p.add_argument("--dest", required=True, help="destination directory, e.g. vendor/il2cpp-dumper")
     p.add_argument("--sha256", help="expected sha256 of the archive")
     p.add_argument("--name", help="label (default: destination name)")
@@ -645,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for objects.jsonl, textassets/, ...")
     p.add_argument("--backend", choices=("auto", "stdlib", "unitypy"), default="auto",
-                   help="stdlib (no deps) or unitypy (bundles + textures/audio/mesh, needs uare[power])")
+                   help="stdlib (no deps) or unitypy (bundles + textures/audio/mesh, needs the power extra)")
     p.set_defaults(func=cmd_export_assets)
 
     p = sub.add_parser("blueprint", help="scene, asset, animation and dependency evidence for reconstruction")

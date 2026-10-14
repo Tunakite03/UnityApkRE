@@ -14,7 +14,7 @@ import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterator, TypeAlias
+from typing import Iterator, NoReturn, TypeAlias, cast
 
 from uare.errors import UareError
 
@@ -84,10 +84,32 @@ def integer(value: Json, context: str) -> int:
 
 
 def read_json(path: Path) -> dict[str, Json]:
+    # The standard decoder produces JSON primitives and string keys. Validate numbers
+    # as they are decoded instead of copying the entire resulting container graph.
+    def finite_float(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise ModelError(f"Cannot preserve serialized data: unsupported float; source={path}")
+        return value
+
+    def reject_constant(text: str) -> NoReturn:
+        raise ModelError(f"Cannot preserve serialized data: unsupported float; source={path}")
+
     try:
-        return record(json.loads(path.read_text(encoding="utf-8")), str(path))
+        with path.open(encoding="utf-8") as handle:
+            value: object = json.load(handle, parse_float=finite_float, parse_constant=reject_constant)
+        if not isinstance(value, dict):
+            raise ModelError(f"Expected a JSON object; source={path}")
+        return cast(dict[str, Json], value)
     except (OSError, UnicodeError, ValueError) as exc:
         raise ModelError(f"Cannot read reconstruction data: {type(exc).__name__}; source={path}") from exc
+
+
+def _parsed_record(value: Json, context: str) -> dict[str, Json]:
+    """Borrow an object owned by the strict JSON decoder without duplicating its payload."""
+    if not isinstance(value, dict):
+        raise ModelError(f"Expected a JSON object; source={context}")
+    return value
 
 
 def write_json(path: Path, value: object) -> None:
@@ -230,12 +252,12 @@ def load_model(path: Path) -> GameModel:
     files: list[FileRecord] = []
     objects: list[ObjectRecord] = []
     for value in array(raw.get("files"), "files"):
-        row = record(value, "file")
+        row = _parsed_record(value, "file")
         files.append(FileRecord(string(row.get("source"), "source"),
                                 string(row.get("serialized_file"), "serialized_file"),
                                 tuple(string(x, "external") for x in array(row.get("externals"), "externals"))))
     for value in array(raw.get("objects"), "objects"):
-        row = record(value, "object")
+        row = _parsed_record(value, "object")
         source = string(row.get("source"), "source")
         serialized = string(row.get("serialized_file"), "serialized_file")
         pid = integer(row.get("path_id"), "path_id")
@@ -252,7 +274,7 @@ def load_model(path: Path) -> GameModel:
                 raise ModelError(f"Unsafe exported asset path; object={oid}")
         objects.append(ObjectRecord(oid, source, serialized, pid,
                                     string(row.get("class_name"), "class_name"),
-                                    string(row.get("name"), "name"), record(row.get("data"), "data"),
+                                    string(row.get("name"), "name"), _parsed_record(row.get("data"), "data"),
                                     status, tuple(string(x, "issue") for x in array(row.get("issues"), "issues")), output))
     # Edges are always recomputed from validated source fields, never trusted from a cached report.
     return resolve(tuple(files), tuple(objects), tuple(string(x, "issue") for x in array(raw.get("issues"), "issues")))

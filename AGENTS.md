@@ -37,6 +37,11 @@ Keep code, comments and architecture documents in English.
   analysis when managed code already answers the question.
 - Use `vendor/ghidra/analyzeHeadless`, which configures the local JDK, rather
   than calling its internal `app/support/analyzeHeadless` directly.
+- Decryption and unpacking (`recover-metadata`, `dump-il2cpp --decrypt`,
+  `unpack-native`, `decrypt-hotdll`) are normal workflow steps. Run them without
+  asking whenever protection blocks analysis; keep the encrypted originals.
+- There is no scope checkpoint: do not stop to ask for a rebuild mode or focus
+  area. Ask only for input that genuinely blocks the requested outcome.
 - Use local installs, pinned versions and verified archives when tools are
   missing. No global package installation or automatic tool replacement.
   See the guide for platform/runtime limits and installation layout.

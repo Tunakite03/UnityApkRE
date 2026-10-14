@@ -4,5 +4,7 @@
   "displayName": "UARE Scene Builder",
   "description": "Builds one scene at a time from a uare scene spec: imports the scene's exported assets, creates materials, applies tags, layers and sorting layers, and rebuilds the GameObject hierarchy with Unity's own API. Scripts that are not in the project become placeholders that keep the original script identity and serialized fields.",
   "unity": "2022.3",
-  "dependencies": {}
+  "dependencies": {
+    "com.unity.2d.sprite": "1.0.0"
+  }
 }

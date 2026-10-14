@@ -2,7 +2,7 @@
 
 The stdlib backend (assets.py) reads SerializedFiles by hand and exports TextAsset bytes and a
 MonoScript table; it cannot open AssetBundles or decode compressed media. This backend uses
-UnityPy (a third-party library, installed via `pip install uare[power]`) to go further:
+UnityPy (a third-party library, the project's `power` extra) to go further:
 
 - opens `assets/aa/**/*.bundle` (UnityFS/legacy) by decompressing LZ4/LZMA internally;
 - decodes Texture2D/Sprite to PNG (needs Pillow), uncompressed AudioClip samples to WAV, and Mesh
@@ -68,7 +68,7 @@ def _require():
         import UnityPy
     except ImportError as exc:  # pragma: no cover - only hit without the extra
         raise UnityPyUnavailable(
-            "UnityPy is not installed; run `pip install uare[power]` or pass --backend stdlib"
+            "UnityPy is not installed; install the `power` extra into the plugin's `.venv-power` (see docs/agent-tools.md) or pass --backend stdlib"
         ) from exc
     return UnityPy
 

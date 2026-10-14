@@ -14,7 +14,7 @@ This toolkit **guides** an AI agent through an interactive workflow: pulling APK
 
 The main CLI launcher is `scripts/uare` (Windows: `scripts\uare.cmd`). It requires Python 3.10+; the core pipeline uses only the Python standard library. Platform-specific `adb` binaries are bundled in `vendor/platform-tools/`.
 
-To open AssetBundles and decode textures, audio clips, and meshes (the "power" mode), install the optional dependencies: `pip install "uare[power]"` (UnityPy + Pillow). External binary tools (Il2CppDumper, Ghidra) are optional and not bundled; specify them with `--dumper`/`--ghidra` or place them in `vendor/` using `fetch-tool`.
+To open AssetBundles and decode textures, audio clips, and meshes (the "power" mode), create the plugin-local environment `.venv-power` with the `power` extra as shown in [the tool guide](agent-tools.md#plugin-root-wrapper-and-python-environment); `scripts/uare` uses it automatically. Do not run `pip install "uare[power]"`: the project's distribution is `unity-apk-re`. External binary tools (Il2CppDumper, Ghidra) are optional and not bundled; specify them with `--dumper`/`--ghidra` or place them in `vendor/` using `fetch-tool`.
 
 ## Interactive Rebuild Workflow
 
@@ -22,8 +22,11 @@ When requested to **"Rebuild game with package:com.example.game"**, the pipeline
 
 1. **ACQUIRE** — Pull APK splits and OBB expansion files from the device via `adb`.
 2. **EXTRACT & RE** — Unpack archives, merge split assets, and perform structural analysis.
-3. **CHECKPOINT / BLUEPRINT** — Report Unity version, scripting backend, asset inventory, and packer status. Establish rebuild scope and focus areas (UI, logic, assets).
-4. **REBUILD** — Generate a reconstruction blueprint and Unity project draft with explicit blockers.
+3. **DECRYPT** — When metadata is wrapped, the native library is packed or hot-update DLLs are encrypted, run `recover-metadata` / `unpack-native` / `decrypt-hotdll` without asking.
+4. **BLUEPRINT & BEHAVIOR** — Report Unity version, scripting backend, asset inventory and protection status; analyze scenes, assets, scripts and behavior with citations.
+5. **REBUILD** — Rebuild scenes into the user's Unity project (Step 12) or generate a structural project draft, with explicit blockers.
+
+There is no scope checkpoint: the agent does not stop to ask for a rebuild mode or focus area.
 
 For detailed agent instructions, see skill `/unity-apk-re:rebuild-game`.
 
@@ -181,9 +184,9 @@ scripts/uare export-assets re/rollinghero/extracted --out re/rollinghero/assets
 | `monoscripts.tsv` | `file, pathID, name, class, namespace, assembly` — maps assets to IL2CPP classes |
 | `assets_report.json` | Aggregated object counts per class |
 
-## Step 8 (Opt-in Boundary): Protection Removal (`recover-metadata` & `unpack-native`)
+## Step 8: Protection Removal (`recover-metadata` & `unpack-native`)
 
-By default, the pipeline only inspects and reports. It does not tamper with encrypted or packed targets. The following commands require deliberate manual invocation:
+`run` only inspects and reports protection. When `analyze` shows wrapped metadata or a packed native library, run these commands (agents run them without asking):
 
 ```bash
 # Metadata with corrupted/encrypted magic: attempt automated heuristic recovery
@@ -216,15 +219,14 @@ scripts/uare il2cpp-enrich re/rollinghero/extracted --out re/rollinghero/enriche
 
 # Or install tool into vendor/ directory for auto-discovery
 scripts/uare fetch-tool --url https://github.com/Perfare/Il2CppDumper/releases/download/vX/Il2CppDumper.zip \
-    --dest vendor/il2cpp-dumper
+    --sha256 <release-sha256> --dest vendor/il2cpp-dumper
 scripts/uare il2cpp-enrich re/rollinghero/extracted --out re/rollinghero/enriched
 
 # Ghidra headless: function disassembly and decompiled pseudo-C matched to RVAs
 scripts/uare decompile re/rollinghero/unpacked/libil2cpp.so --out re/rollinghero/ghidra \
     --ghidra /path/to/ghidra/support/analyzeHeadless
 
-# Full asset export with UnityPy (requires uare[power])
-pip install "uare[power]"
+# Full asset export with UnityPy (requires the power extra in .venv-power, see docs/agent-tools.md)
 scripts/uare export-assets re/rollinghero/extracted --out re/rollinghero/assets --backend unitypy
 
 # Standardized reconstruction asset package
@@ -245,7 +247,7 @@ Output deliverables:
 
 ## Step 10: Complete Asset Packaging (`package`)
 
-The unified `run` command executes `package` following analysis, writing into `<workdir>/extracted-assets/`. Requires `pip install "uare[power]"`.
+The unified `run` command executes `package` following analysis, writing into `<workdir>/extracted-assets/`. Requires the `power` extra in `.venv-power` (see [the tool guide](agent-tools.md#plugin-root-wrapper-and-python-environment)).
 
 To run asset packaging independently:
 
@@ -291,7 +293,7 @@ shared copy. `zip` and `rsync` without `-H` store each link as a separate copy.
 - **Hot-update DLL detection**: Bundled assemblies (e.g., `GameHotfix_*.dll`) missing standard PE headers are preserved under `scripts/hotdll/` for subsequent decryption.
 - Unexportable objects (0×0 placeholder textures, malformed type trees) are logged into `catalog.json` with explicit explanations.
 
-## Step 11 (Opt-in Boundary): Hot-Update DLL Decryption (`decrypt-hotdll`)
+## Step 11: Hot-Update DLL Decryption (`decrypt-hotdll`)
 
 Games utilizing **HybridCLR** or similar runtimes encrypt hot-update assemblies as `MAGIC || ciphertext` and embed decryption keys inside the Ahead-of-Time (AOT) metadata: the C# compiler places constant byte arrays (`new byte[]{...}`) into the `<PrivateImplementationDetails>` class, **where field names are the SHA-256 hashes of the byte arrays**, and raw values reside in the `fieldAndParameterDefaultValueData` blob of `global-metadata.dat`.
 
@@ -305,7 +307,7 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
   3. Tests standard cipher schemes: AES-128-CBC, AES-128-GCM, ChaCha20, RC4, and XOR across standard magic prefixes.
   4. Accepts a candidate key only when the decrypted output yields a **valid PE/COFF header** and valid PKCS#7 padding.
 - Does not require `libil2cpp.so`—keys are recovered entirely from metadata constants.
-- Pure Python fallback included; install `pip install "uare[crypto]"` for PyCryptodome acceleration.
+- Pure Python fallback included; install the `crypto` extra into `.venv-power` (`"<plugin-root>[power,crypto]"`) for PyCryptodome acceleration.
 - Generates `decrypted/*.dll` (decompilable via ILSpy), `keys.json` (reusable with `--keys`), and `report.json`.
 - Custom algorithms can be specified explicitly: `--algo <cipher> --key <hex> --iv <hex> --magic <hex>`.
 
@@ -325,7 +327,7 @@ scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/s
 - Tests: add `"testables": ["com.uare.scenebuilder"]` to the manifest. EditMode tests cover property writing; the PlayMode test loads every scene under `Assets` for 120 frames and appends results to `Logs/uare-playmode.jsonl`.
 - Spec v2 also carries each scene's RenderSettings and LightmapSettings, every saved material property (textures with scale/offset, floats, ints, colors, keywords, render queue), the original texture settings (filter, wrap, mipmaps, readable, Alpha8) and ScriptableObject assets such as TMP font assets and Spine `SkeletonDataAsset`/`SpineAtlasAsset`, rebuilt from their own fields when their script exists in the project. Text files keep their original TextAsset name; `.skel` becomes `.skel.txt` and `.atlas` becomes `.atlas.bytes`, because spine-unity's importer acts on `.skel.bytes`/`.atlas.txt` and can open modal dialogs.
 - Root order: a build keeps no editor root order. A probe bundle on 2022.3 showed that Unity loads the roots of a built scene in path-ID order, so the rebuilt order (`rootOrderBasis: path_id`) is the order the shipped game sees at runtime.
-- Game code (only with the user's explicit authorization to decrypt): decrypt with `decrypt-hotdll`, run `il2cpp-enrich` for Il2CppDumper stub DLLs of the AOT assemblies, copy the decrypted hot-update DLLs plus the stubs they reference into the project, and turn off Auto Reference for all of them (`isExplicitlyReferenced: 1`), or a game type such as a global `ObjectPool<T>` can break package compilation. Stub DLLs need two repairs before the Editor loads them cleanly: attribute type arguments stored without an assembly name, and the bodiless `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` type. The builder then binds scripts to the real hot-update types, reports stub-bound scripts separately (`stubBoundScripts`: original fields, no original logic), and keeps placeholders only for types that are absent.
+- Game code: decrypt with `decrypt-hotdll` (Step 11), run `il2cpp-enrich` for Il2CppDumper stub DLLs of the AOT assemblies, copy the decrypted hot-update DLLs plus the stubs they reference into the project, and turn off Auto Reference for all of them (`isExplicitlyReferenced: 1`), or a game type such as a global `ObjectPool<T>` can break package compilation. Stub DLLs need two repairs before the Editor loads them cleanly: attribute type arguments stored without an assembly name, and the bodiless `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` type. The builder then binds scripts to the real hot-update types, reports stub-bound scripts separately (`stubBoundScripts`: original fields, no original logic), and keeps placeholders only for types that are absent.
 - Spine 3.8 data needs spine-unity 3.8. Its git package lacks spine-csharp, so install it as an embedded package: `spine-unity/Assets/Spine` plus `spine-csharp/src` copied into `Runtime/spine-csharp`.
 
 ---
@@ -336,7 +338,7 @@ scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/s
 2. **Metadata versions**: Validated layouts support versions 24 (24.2, 24.4 distinguished by header size), 27, 28, 29, 30, and 31. Older versions fall back to flat identifier extraction via `analyze`.
 3. **SerializedFile formats**: Supports format versions ≥ 17 (Unity 2017.1+). Earlier formats are recorded in header inspection but rejected during deep object extraction.
 4. **Obfuscated identifiers**: Stripped or obfuscated symbols are tracked and left blank; the tool never invents or guesses names.
-5. **Media codecs**: Standard `export-assets` extracts raw TextAsset bytes and catalogs objects, but does not decompress complex textures or audio codecs (ETC, ASTC, Vorbis). Use `package` with `uare[power]` (UnityPy) for decoded media.
+5. **Media codecs**: Standard `export-assets` extracts raw TextAsset bytes and catalogs objects, but does not decompress complex textures or audio codecs (ETC, ASTC, Vorbis). Use `package` with the `power` extra (UnityPy) for decoded media.
 6. **Encrypted boundaries**: Custom proprietary packing or encryption requires user-supplied keys or external unpackers via `--key`, `--keys`, or `--cmd`.
 
 ---

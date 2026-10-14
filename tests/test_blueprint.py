@@ -161,6 +161,23 @@ class BlueprintTests(unittest.TestCase):
         self.assertEqual(report["kind"], "prefab")
         self.assertEqual(report["classification_evidence"], "AssetBundle.m_Container")
 
+    def _guid_file_model(self, anchor_name: str) -> GameModel:
+        guid = "000385f0e1866fd4cb29245d14652f36"
+        anchor = "8f586378b4e144a9851e7b34d9b748ee"
+        objects = (obj("Data/" + guid, guid, 1, "GameObject", {"m_Name": "Fx_Hit01", "m_Component": [{"component": ptr(0, 2)}]}),
+                   obj("Data/" + guid, guid, 2, "Transform", {"m_GameObject": ptr(0, 1), "m_Father": ptr(0, 0), "m_Children": []}),
+                   obj("Data/" + anchor, anchor, 1, "MonoBehaviour", {"m_Name": anchor_name}))
+        return resolve((FileRecord("Data/" + guid, guid, ()), FileRecord("Data/" + anchor, anchor, ())), objects, ())
+
+    def test_guid_named_file_hierarchy_is_a_prefab_when_anchors_verify_the_layout(self) -> None:
+        report = next(r for r in scene_reports(self._guid_file_model("LiberationSans SDF")) if r["name"] == "Fx_Hit01")
+        self.assertEqual(report["kind"], "prefab")
+        self.assertIn("source asset GUID", report["classification_evidence"])
+
+    def test_guid_named_file_stays_unclassified_when_an_anchor_contradicts(self) -> None:
+        reports = scene_reports(self._guid_file_model("Some Other Font"))
+        self.assertEqual([r["kind"] for r in reports], ["unclassified_hierarchy"])
+
     def test_safe_offline_html_and_version_unknown_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)

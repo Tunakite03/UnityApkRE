@@ -118,14 +118,16 @@ class SceneSpecTests(unittest.TestCase):
         self.assertEqual((transform["m_LocalPosition.z"]["number"], transform["m_LocalPosition.z"]["text"]), (0.0, ""))
         self.assertFalse(any("$float" in path for path in transform))
 
-    def test_non_finite_material_setting_fails_loudly(self) -> None:
+    def test_non_finite_material_property_is_dropped_and_reported(self) -> None:
         shared = shared_objects()
         material = shared[3]
         props = material.data["m_SavedProperties"]
         shared[3] = replace(material, data={**material.data, "m_SavedProperties": {
             **props, "m_Colors": [["_Color", {"r": 0.5, "g": {"$float": "Infinity"}, "b": 1, "a": 1}]]}})
-        with self.assertRaisesRegex(SceneSpecError, "non-finite.*Infinity"):
-            self.build(scene_objects() + shared)
+        spec, _ = self.build(scene_objects() + shared)
+        entry = next(a for a in spec["assets"] if a["className"] == "Material")
+        self.assertEqual(entry["colors"], [])
+        self.assertEqual(entry["droppedProperties"], ["color _Color holds non-finite Infinity"])
 
     def test_references_resolve_to_scene_objects_assets_missing_or_unresolved(self) -> None:
         spec, result = self.build(scene_objects() + shared_objects())
@@ -150,13 +152,23 @@ class SceneSpecTests(unittest.TestCase):
         objects = scene_objects() + shared_objects()
         objects[objects.index(next(o for o in objects if o.path_id == 20 and o.source == BUNDLE))] = obj(
             BUNDLE, "CAB", 20, "Sprite", {"m_Name": "hero", "m_PixelsToUnits": 64, "m_Pivot": {"x": 0.5, "y": 0},
-                                          "m_Border": {"x": 1, "y": 2, "z": 3, "w": 4}, "m_RD": {"texture": ptr(0, 21)}},
+                                          "m_Border": {"x": 1, "y": 2, "z": 3, "w": 4}, "m_RD": {"texture": ptr(0, 21)},
+                                          "m_Rect": {"x": 0, "y": 0, "width": 32, "height": 16}},
             "shared/sprites/scenes/hero.png")
+        texture = next(o for o in objects if o.path_id == 21 and o.source == BUNDLE)
+        objects[objects.index(texture)] = replace(texture, data={**texture.data, "m_Width": 32, "m_Height": 16})
         spec, _ = self.build(objects)
         assets = {a["path"]: a for a in spec["assets"]}
-        sprite = assets["shared/sprites/scenes/hero.png"]
-        self.assertEqual((sprite["kind"], sprite["pixelsPerUnit"], sprite["pivotY"], sprite["borderTop"]), ("file", 64.0, 0.0, 4.0))
-        self.assertEqual((sprite["filterMode"], sprite["wrapU"], sprite["mipmaps"], sprite["alphaOnly"]), (0, 1, False, True))
+        self.assertNotIn("shared/sprites/scenes/hero.png", assets)
+        sprite = assets["shared/textures/scenes/atlas.png#hero"]
+        self.assertEqual((sprite["kind"], sprite["spriteName"], sprite["imagePath"], sprite["importPath"]),
+                         ("sprite", "hero", "shared/textures/scenes/atlas.png", "shared/textures/scenes/atlas.png"))
+        image = assets["shared/textures/scenes/atlas.png"]
+        self.assertEqual((image["spriteMode"], image["pixelsPerUnit"]), ("single", 64.0))
+        self.assertEqual((image["sprites"][0]["pivotY"], image["sprites"][0]["borderTop"], image["sprites"][0]["width"]), (0.0, 4.0, 32.0))
+        self.assertEqual((image["filterMode"], image["wrapU"], image["mipmaps"], image["alphaOnly"]), (0, 1, False, True))
+        renderer = props(spec["gameObjects"][1]["components"][1])
+        self.assertEqual(renderer["m_Sprite"]["refTarget"], "shared/textures/scenes/atlas.png#hero")
         material = assets["shared/materials/scenes/HeroMat.json"]
         self.assertEqual((material["kind"], material["importPath"], material["shaderName"]),
                          ("material", "shared/materials/scenes/HeroMat.mat", "Sprites/Default"))
@@ -169,6 +181,22 @@ class SceneSpecTests(unittest.TestCase):
         self.assertEqual(spec["sortingLayers"][1], {"name": "Actors", "uniqueId": 7})
         self.assertEqual(spec["layers"][8], "Hero")
         self.assertEqual(spec["rootOrderBasis"], "path_id")
+
+    def test_sprites_cut_from_one_texture_form_a_multiple_sheet_with_unique_names(self) -> None:
+        objects = scene_objects() + shared_objects()
+        sprite = next(o for o in objects if o.path_id == 20 and o.source == BUNDLE)
+        cut = {"m_RD": {"texture": ptr(0, 21)}, "m_PixelsToUnits": 64, "m_Rect": {"x": 0, "y": 0, "width": 8, "height": 8}}
+        objects[objects.index(sprite)] = replace(sprite, data={**sprite.data, **cut})
+        objects.append(obj(BUNDLE, "CAB", 22, "Sprite", {"m_Name": "hero", **cut, "m_Rect": {"x": 8, "y": 0, "width": 8, "height": 8}}))
+        spec, _ = self.build(objects)
+        image = next(a for a in spec["assets"] if a["path"] == "shared/textures/scenes/atlas.png")
+        self.assertEqual(image["spriteMode"], "multiple")
+        self.assertEqual([(s["name"], s["x"]) for s in image["sprites"]], [("hero", 0.0), ("hero_22", 8.0)])
+
+    def test_sprite_without_an_exported_texture_keeps_its_cropped_file(self) -> None:
+        spec, _ = self.build(scene_objects() + shared_objects())
+        sprite = next(a for a in spec["assets"] if a["className"] == "Sprite")
+        self.assertEqual((sprite["kind"], sprite["path"], sprite["pixelsPerUnit"]), ("file", "shared/sprites/scenes/hero.png", 64.0))
 
     def test_text_assets_keep_their_name_and_avoid_spine_importer_names(self) -> None:
         objects = scene_objects() + shared_objects()

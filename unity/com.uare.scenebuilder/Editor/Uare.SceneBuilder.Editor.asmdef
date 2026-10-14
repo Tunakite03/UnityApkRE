@@ -2,7 +2,8 @@
     "name": "Uare.SceneBuilder.Editor",
     "rootNamespace": "Uare.SceneBuilder.Editor",
     "references": [
-        "Uare.SceneBuilder"
+        "Uare.SceneBuilder",
+        "Unity.2D.Sprite.Editor"
     ],
     "includePlatforms": [
         "Editor"

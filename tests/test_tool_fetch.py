@@ -1,7 +1,9 @@
 import functools
 import hashlib
+import io
 import json
 import ssl
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -60,6 +62,29 @@ class ToolFetchTests(unittest.TestCase):
         with self.assertRaises(UareError):
             fetch_archive(url, self.tmp / "out", context=self.context)
         self.assertFalse((self.tmp / "escape").exists())
+
+    def _tar(self, name: str, entries: list[tarfile.TarInfo], payloads: dict[str, bytes]) -> str:
+        with tarfile.open(self.serve / name, "w:xz") as tf:
+            for info in entries:
+                tf.addfile(info, io.BytesIO(payloads[info.name]) if info.isfile() else None)
+        return self.url.rsplit("/", 1)[0] + "/" + name
+
+    def test_tar_xz_keeps_executable_mode(self) -> None:
+        info = tarfile.TarInfo("AssetRipper/AssetRipper.GUI.Free")
+        info.size, info.mode = 6, 0o755
+        url = self._tar("tool.tar.xz", [info], {info.name: b"binary"})
+        record = fetch_archive(url, self.tmp / "out", context=self.context)
+        target = self.tmp / "out/AssetRipper/AssetRipper.GUI.Free"
+        self.assertEqual(record.files[info.name], hashlib.sha256(b"binary").hexdigest())
+        self.assertTrue(target.stat().st_mode & 0o100)
+
+    def test_tar_link_out_of_the_destination_is_rejected(self) -> None:
+        link = tarfile.TarInfo("escape")
+        link.type, link.linkname = tarfile.SYMTYPE, "../../outside"
+        url = self._tar("evil.tar.xz", [link], {})
+        with self.assertRaises(UareError):
+            fetch_archive(url, self.tmp / "out", context=self.context)
+        self.assertFalse((self.tmp / "out").exists())
 
     def test_single_file_download_is_stored(self) -> None:
         (self.serve / "blob.bin").write_bytes(b"rawtool")

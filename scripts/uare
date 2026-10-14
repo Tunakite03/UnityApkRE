@@ -3,7 +3,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${UARE_PYTHON:-$(command -v python3 || true)}"
+# Interpreter order: UARE_PYTHON, then the plugin-local `power` environment, then python3 on PATH.
+if [[ -n "${UARE_PYTHON:-}" ]]; then
+  PYTHON="$UARE_PYTHON"
+elif [[ -x "$ROOT/.venv-power/bin/python" ]]; then
+  PYTHON="$ROOT/.venv-power/bin/python"
+else
+  PYTHON="$(command -v python3 || true)"
+fi
 
 if [[ -z "$PYTHON" ]]; then
   echo "uare: python3 >= 3.10 not found on PATH; set UARE_PYTHON to an interpreter" >&2

@@ -6,9 +6,13 @@ paths (``a.b``, ``a.Array.size``, ``a.Array.data[0]``), and every object referen
 through the game model: to a GameObject or component of the same scene, to an asset of the spec's
 asset table, or to an explicit missing/unresolved entry.
 
-The asset table has three kinds of entries, each with the path it gets inside the project:
+The asset table has four kinds of entries, each with the path it gets inside the project:
 
-* ``file``: an exported file copied as is (textures, sprites, meshes, fonts, audio, text);
+* ``file``: an exported file copied as is (textures, meshes, fonts, audio, text). A texture carries
+  ``spriteMode`` (``none``, ``single`` or ``multiple``) and every sprite the build cuts from it (rect,
+  pivot, border, pixels per unit), so each scene imports the texture with the same sprite sheet;
+* ``sprite``: one sprite inside such a texture, keyed ``<texture path>#<sprite name>``. A sprite whose
+  texture was not exported falls back to its own cropped ``file``;
 * ``material``: a material created from its type-tree properties;
 * ``scriptable``: a ScriptableObject (a MonoBehaviour asset such as a TMP font asset or a Spine
   SkeletonDataAsset) created from its type-tree fields when its script exists in the project.
@@ -33,7 +37,7 @@ from uare.outdir import staged_output
 LOG = logging.getLogger("uare.scene_spec")
 
 SCHEMA = "uare.scene-spec"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Set structurally by the builder (hierarchy, ownership, script binding) or managed by Unity itself.
 _STRUCTURAL = frozenset({
@@ -103,7 +107,8 @@ def _asset_entry(path: str, import_path: str, kind: str, target: ObjectRecord) -
         "borderLeft": 0.0, "borderBottom": 0.0, "borderRight": 0.0, "borderTop": 0.0,
         "filterMode": -1, "wrapU": -1, "wrapV": -1, "mipmaps": False, "readable": False, "alphaOnly": False,
         "shaderName": "", "renderQueue": -1, "keywords": [], "textures": [], "floats": [], "ints": [], "colors": [],
-        "scriptClass": "", "scriptNamespace": "", "scriptAssembly": "", "props": [],
+        "scriptClass": "", "scriptNamespace": "", "scriptAssembly": "", "props": [], "droppedProperties": [],
+        "spriteMode": "none", "sprites": [], "spriteName": "", "imagePath": "",
     }
 
 
@@ -117,6 +122,23 @@ class _SpecBuilder:
         self._assets: dict[str, dict[str, Json]] = {}
         self._linkable: set[str] = set()
         self.unresolved = 0
+        # Every sprite the build cuts from each texture, in path-ID order, with a name unique in that texture.
+        self._sheets: dict[str, list[ObjectRecord]] = defaultdict(list)
+        for obj in model.objects:
+            if obj.class_name == "Sprite":
+                texture_id = self._target(obj.id, "m_RD.texture")
+                if texture_id is not None:
+                    self._sheets[texture_id].append(obj)
+        self._sprite_names: dict[str, str] = {}
+        for sprites in self._sheets.values():
+            sprites.sort(key=lambda s: (s.source, s.serialized_file, s.path_id))
+            used: set[str] = set()
+            for sprite in sprites:
+                name = sprite.name or f"sprite_{sprite.path_id}"
+                if name in used:
+                    name = f"{name}_{sprite.path_id}"
+                used.add(name)
+                self._sprite_names[sprite.id] = name
 
     # -- references ---------------------------------------------------------------------------
 
@@ -151,6 +173,10 @@ class _SpecBuilder:
             return None
         if output in self._assets:
             return output
+        if target.class_name == "Sprite":
+            key = self._sheet_sprite(target)
+            if key is not None:
+                return key
         if target.class_name in _FILES and output.endswith(_FILES[target.class_name]):
             entry = _asset_entry(output, output, "file", target)
             self._assets[output] = entry
@@ -158,6 +184,7 @@ class _SpecBuilder:
                 self._sprite_settings(target, entry)
             elif target.class_name == "Texture2D":
                 self._texture_settings(target, entry)
+                self._sheet_settings(target, entry)
         elif target.class_name == "TextAsset":
             self._assets[output] = _asset_entry(output, _text_import_path(output), "file", target)
         elif target.class_name == "Material" and output.endswith(".json"):
@@ -174,6 +201,55 @@ class _SpecBuilder:
         else:
             return None
         return output
+
+    def _sheet_sprite(self, sprite: ObjectRecord) -> str | None:
+        """Register `sprite` as a sub-asset of its exported texture; None when the texture was not exported."""
+        texture_id = self._target(sprite.id, "m_RD.texture")
+        texture = self._by_id.get(texture_id) if texture_id else None
+        if texture is None or texture.class_name != "Texture2D":
+            return None
+        image = self._asset(texture)
+        if image is None:
+            return None
+        key = f"{image}#{self._sprite_names[sprite.id]}"
+        if key not in self._assets:
+            entry = _asset_entry(key, self._assets[image]["importPath"], "sprite", sprite)
+            entry["spriteName"] = self._sprite_names[sprite.id]
+            entry["imagePath"] = image
+            self._assets[key] = entry
+        return key
+
+    def _sheet_settings(self, texture: ObjectRecord, entry: dict[str, Json]) -> None:
+        """Sprite mode and sprite rects of a texture: one sprite covering it is `single`, anything else `multiple`."""
+        sprites = self._sheets.get(texture.id, [])
+        if not sprites:
+            return
+        width, height = _number(texture.data.get("m_Width"), 0.0), _number(texture.data.get("m_Height"), 0.0)
+        sheet: list[dict[str, Json]] = []
+        for sprite in sprites:
+            data = sprite.data
+            rect = data.get("m_Rect") if isinstance(data.get("m_Rect"), dict) else {}
+            pivot = data.get("m_Pivot") if isinstance(data.get("m_Pivot"), dict) else {}
+            border = data.get("m_Border") if isinstance(data.get("m_Border"), dict) else {}
+            sheet.append({
+                "name": self._sprite_names[sprite.id],
+                "x": _number(rect.get("x"), 0.0), "y": _number(rect.get("y"), 0.0),
+                "width": _number(rect.get("width"), 0.0), "height": _number(rect.get("height"), 0.0),
+                "pivotX": _number(pivot.get("x"), 0.5), "pivotY": _number(pivot.get("y"), 0.5),
+                "borderLeft": _number(border.get("x"), 0.0), "borderBottom": _number(border.get("y"), 0.0),
+                "borderRight": _number(border.get("z"), 0.0), "borderTop": _number(border.get("w"), 0.0),
+                "pixelsPerUnit": _number(data.get("m_PixelsToUnits"), 100.0),
+            })
+        first = sheet[0]
+        full = (len(sheet) == 1 and abs(float(first["x"])) < 1 and abs(float(first["y"])) < 1 and
+                abs(float(first["width"]) - width) < 1 and abs(float(first["height"]) - height) < 1)
+        entry["spriteMode"] = "single" if full else "multiple"
+        entry["sprites"] = sheet
+        ppus = sorted({float(s["pixelsPerUnit"]) for s in sheet})
+        entry["pixelsPerUnit"] = ppus[0]
+        if len(ppus) > 1:
+            # A texture importer has one pixels-per-unit value for its whole sprite sheet.
+            entry["droppedProperties"] = [f"sprite pixelsPerUnit {ppus[1:]} differs from the sheet value {ppus[0]}"]
 
     def _is_asset(self, behaviour: ObjectRecord) -> bool:
         """A MonoBehaviour that belongs to no GameObject is a ScriptableObject asset."""
@@ -253,14 +329,25 @@ class _SpecBuilder:
                              "scaleX": _number(scale.get("x"), 1.0), "scaleY": _number(scale.get("y"), 1.0),
                              "offsetX": _number(offset.get("x"), 0.0), "offsetY": _number(offset.get("y"), 0.0)})
         entry["textures"] = textures
+        # JSON numbers cannot carry NaN/Infinity; such properties are left out and reported by the builder.
+        dropped: list[str] = []
+
+        def finite(kind: str, name: str, values: list[Json]) -> bool:
+            spellings = [s for s in (non_finite(v) for v in values) if s is not None]
+            if spellings:
+                dropped.append(f"{kind} {name} holds non-finite {'/'.join(spellings)}")
+            return not spellings
+
         entry["floats"] = [{"name": str(p[0]), "value": _number(p[1], 0.0)} for p in props.get("m_Floats") or []
-                           if isinstance(p, list) and len(p) == 2]
+                           if isinstance(p, list) and len(p) == 2 and finite("float", str(p[0]), [p[1]])]
         entry["ints"] = [{"name": str(p[0]), "value": _number(p[1], 0.0)} for p in props.get("m_Ints") or []
-                         if isinstance(p, list) and len(p) == 2]
+                         if isinstance(p, list) and len(p) == 2 and finite("int", str(p[0]), [p[1]])]
         entry["colors"] = [{"name": str(p[0]), "r": _number(p[1].get("r"), 0.0), "g": _number(p[1].get("g"), 0.0),
                             "b": _number(p[1].get("b"), 0.0), "a": _number(p[1].get("a"), 0.0)}
                            for p in props.get("m_Colors") or []
-                           if isinstance(p, list) and len(p) == 2 and isinstance(p[1], dict)]
+                           if isinstance(p, list) and len(p) == 2 and isinstance(p[1], dict)
+                           and finite("color", str(p[0]), [p[1].get(c) for c in "rgba"])]
+        entry["droppedProperties"] = dropped
 
     # -- properties ---------------------------------------------------------------------------
 

@@ -32,6 +32,32 @@ Different builds or cached-content versions must retain their provenance; do not
 merge them solely because they share a game name. Pipeline completion establishes
 artifact generation, not Unity import, compilation or gameplay correctness.
 
+## Plugin root, wrapper and Python environment
+
+All paths in this guide and in the skills are relative to the plugin root, not to
+the current working directory. In an installed Claude Code plugin the root is
+`${CLAUDE_PLUGIN_ROOT}`; in a checkout it is the repository root. Always call the
+wrapper by its full path, e.g. `"${CLAUDE_PLUGIN_ROOT}/scripts/uare" doctor`
+(Windows: `"%CLAUDE_PLUGIN_ROOT%\scripts\uare.cmd"`), and put game workspaces in
+the user's working directory (for example `re/<game>`), never inside the plugin.
+
+`vendor/` and `.venv-power/` live inside the plugin root. A plugin update
+replaces that directory, so after an update re-check the payloads listed below
+and the power environment before relying on them.
+
+The wrapper selects its interpreter in this order: `UARE_PYTHON`, then
+`<plugin-root>/.venv-power`, then `python3` on PATH. Create the power
+environment once per plugin installation (never install into a global Python):
+
+```bash
+ROOT="${CLAUDE_PLUGIN_ROOT:-$PWD}"
+python3 -m venv "$ROOT/.venv-power"
+"$ROOT/.venv-power/bin/python" -m pip install "$ROOT[power,crypto]"   # crypto speeds up decrypt-hotdll
+```
+
+The PyPI distribution of this project is `unity-apk-re`; never run
+`pip install uare[...]`, which names an unrelated package.
+
 ## Tool roles and layout
 
 | Tool | Local path | When it is needed | Output / limitation |
@@ -39,6 +65,8 @@ artifact generation, not Unity import, compilation or gameplay correctness.
 | ADB | `vendor/platform-tools/<platform>/` | Acquire installed APK splits and accessible device content | Acquisition only; does not decode Unity objects |
 | UnityPy and power dependencies | Project Python environment, declared in `pyproject.toml` | Read scenes, prefabs, hierarchy, assets and serialized animation data | Keep Python environments in place; moving a venv breaks absolute launch paths |
 | ILSpy | `vendor/ilspy/ilspycmd` | Decompile genuine managed DLLs, including recovered HybridCLR hot-update code | Readable C#; not original comments, layout or a verified compiling game |
+| AssetRipper | `vendor/assetripper/app/AssetRipper.GUI.Free` (2.0.0, fetched with `uare fetch-tool` and its release SHA-256) | `uare assetripper`: native prefabs, AnimationClips, AnimatorControllers, materials and textures with native sprite sheets | Its own GUIDs/file IDs; MonoBehaviour fields only when its IL2CPP initialisation succeeds (see report.json) |
+| TypeTreeGeneratorAPI | Project Python environment (`power` extra); offline wheels may be kept in `vendor/wheels/` | Generate MonoBehaviour type trees from supplied managed DLLs (`package --script-assemblies`) | Needs the BCL and engine modules of a matching Unity major version; layouts are accepted only by exact byte consumption |
 | Il2CppDumper | `vendor/il2cpp-dumper/Il2CppDumper` | Join `libil2cpp.so` with matching metadata to recover types, signatures and RVAs | `dump.cs` and DummyDll are structural stubs, not recovered method bodies |
 | Ghidra | `vendor/ghidra/analyzeHeadless`, distribution in `vendor/ghidra/app/` | Analyze native logic that managed code cannot explain | Function listing and pseudo-C, requiring interpretation and address validation |
 | Compatible JDK | `vendor/jdk21/Contents/Home/` (macOS) or `vendor/jdk21/` (Linux) | Run the installed Ghidra and compile Java analysis scripts | Host dependency only; not a game SDK or a requirement for asset extraction |
@@ -80,33 +108,32 @@ PATH. An invalid explicit override fails instead of silently falling back.
 
 ## Commands for agents
 
-Run from the repository root. Use an absolute interpreter path if selecting an
-existing environment, because tests also invoke wrappers from other directories.
-The commands below assume a configured `.venv-power`; substitute the actual
-interpreter if needed. Replace the input paths with paths verified from the
+Use the plugin root (see above) for the wrapper and vendored tools. The wrapper
+already prefers `<plugin-root>/.venv-power`; set `UARE_PYTHON` only to select a
+different interpreter. Replace the input paths with paths verified from the
 selected capture. Choose an ABI present in that capture and matching metadata.
 
 ```bash
-export UARE_PYTHON="$PWD/.venv-power/bin/python"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$PWD}"
 UARE_WORKDIR="/absolute/path/to/selected-workspace"
 UARE_NATIVE_LIBRARY="/absolute/path/to/matching/libil2cpp.so"
-scripts/uare doctor
+"$ROOT/scripts/uare" doctor
 dotnet --list-runtimes
-vendor/ilspy/ilspycmd --version
+"$ROOT/vendor/ilspy/ilspycmd" --version
 # macOS vendored layout; use "$JAVA_HOME/bin/java" for an explicit JDK.
-vendor/jdk21/Contents/Home/bin/java -version
+"$ROOT/vendor/jdk21/Contents/Home/bin/java" -version
 
 # Optional native enrichment, only into a new/empty output directory.
-scripts/uare il2cpp-enrich "$UARE_WORKDIR/extracted" \
+"$ROOT/scripts/uare" il2cpp-enrich "$UARE_WORKDIR/extracted" \
   --so "$UARE_NATIVE_LIBRARY" --out "$UARE_WORKDIR/enriched-review"
 
 # The vendored launcher selects the local JDK automatically.
-scripts/uare decompile "$UARE_NATIVE_LIBRARY" \
+"$ROOT/scripts/uare" decompile "$UARE_NATIVE_LIBRARY" \
   --out "$UARE_WORKDIR/native-review"
 
-scripts/run-tests -p 'test_ghidra.py'
-scripts/run-tests -p 'test_il2cpp_tools.py'
-scripts/run-tests -p 'test_mono_decompile.py'
+"$ROOT/scripts/run-tests" -p 'test_ghidra.py'
+"$ROOT/scripts/run-tests" -p 'test_il2cpp_tools.py'
+"$ROOT/scripts/run-tests" -p 'test_mono_decompile.py'
 ```
 
 Do not run full native decompilation just to check installation. Use a small

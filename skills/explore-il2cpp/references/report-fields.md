@@ -11,7 +11,7 @@
 
 Names are taken from each record's nameIndex. Unreadable (obfuscated/blob) entries are emitted as empty and counted in the command's summary. `members.tsv` is built from the per-type member ranges in `Il2CppTypeDefinition`, so grouping needs no binary; a type whose range does not fit its member table is skipped and counted (`ranges_skipped`), never guessed. Signatures, base/nested/interface names and RVAs are still absent — see the skill's Limits.
 
-Two opt-in commands handle protected builds: `recover-metadata` (writes `global-metadata.dat` + `recovery.json`) and `unpack-native` (writes `elf_report.json` + an unpacked `.so` when given `--cmd`).
+Separate commands (run them whenever the report shows protection) handle protected builds: `recover-metadata` (writes `global-metadata.dat` + `recovery.json`) and `unpack-native` (writes `elf_report.json` + an unpacked `.so` when given `--cmd`).
 
 ## `uare package` (packaged/ directory)
 
@@ -28,7 +28,7 @@ Full asset export (`extracted-assets/`, written by `run` or `package`). Assets a
 
 `name` is filled only for types whose body begins with m_Name (Texture2D, TextAsset, AudioClip, Mesh, Sprite, Shader, Font, MonoScript, ...); other objects have an empty name. Bundles under `assets/aa` (Addressables) are counted but not unpacked.
 
-With `--backend unitypy` (needs `pip install uare[power]`) the same command additionally opens AssetBundles and writes: `textures/*.png`, `audio/*.wav`, `meshes/*.obj`, `monobehaviours/*.json` (typetree dicts; needs a type tree, e.g. Visual Scripting graphs), plus the same `objects.jsonl` and `monoscripts.tsv`. Objects it cannot decode are still counted in `assets_report.json.errors`.
+With `--backend unitypy` (needs the `power` extra in `<plugin-root>/.venv-power`) the same command additionally opens AssetBundles and writes: `textures/*.png`, `audio/*.wav`, `meshes/*.obj`, `monobehaviours/*.json` (typetree dicts; needs a type tree, e.g. Visual Scripting graphs), plus the same `objects.jsonl` and `monoscripts.tsv`. Objects it cannot decode are still counted in `assets_report.json.errors`.
 
 ## `uare il2cpp-enrich` (enriched/ directory)
 

@@ -18,3 +18,5 @@ dist/
 !/vendor/il2cpp-dumper/Il2CppDumper
 /vendor/jdk21/
 /vendor/ilspy/
+/vendor/wheels/
+/vendor/assetripper/app/

@@ -7,8 +7,10 @@ provenance, direct/transitive asset usage, animation data, script bindings, SDK 
 and concrete gaps. Asset exports support that model. `rebuild` creates a structural draft
 and reports unresolved bindings; it does not claim a complete playable game.
 
-Python 3.10+ is required. Binary packaging uses the project-local `power` extra;
-blueprint generation uses the standard library. adb is bundled for supported platforms.
+Python 3.10+ is required. Binary packaging uses the `power` extra, installed into
+`.venv-power` inside the plugin (or checkout) root, which `scripts/uare` uses automatically;
+see [the tool guide](docs/agent-tools.md#plugin-root-wrapper-and-python-environment).
+Blueprint generation uses the standard library. adb is bundled for supported platforms.
 
 ## How it works
 
@@ -92,16 +94,23 @@ The `uare` CLI handles binary format parsing and tasks that agents cannot do nat
 | Command | What it does |
 |---|---|
 | `doctor` | Shows resolved adb, its version, and connected devices |
+| `fetch-adb` | Download official platform-tools adb into `vendor/` |
+| `devices` / `packages [--filter WORD]` | List devices / third-party packages on the device |
+| `logcat [package]` | Dump, stream and filter device logs (`--dump`, `--follow`, `--grep`, `--unity-only`) |
 | `pull <package> --out DIR` | Pull all APK splits and OBBs from a device |
 | `extract <archives> --out DIR` | Merge APK splits into one tree |
 | `analyze <root> --out DIR` | Report on Unity version, scripting backend, IL2CPP metadata, packing |
 | `run <package> --workdir DIR` | Pull + extract + analyze + package + blueprint |
 | `plan <package> --workdir DIR` | Dry run: list steps, commands, prerequisites |
-| `package <root> --out DIR` | Full categorized asset export (needs `uare[power]`) |
+| `summary <analysis>` | Print the summary of an existing analysis directory |
+| `package <root> --out DIR` | Full categorized asset export (needs the `power` extra in `.venv-power`) |
 | `dump-il2cpp <root> --out DIR` | Categorized IL2CPP name tables |
 | `find DIR REGEX` | Search identifiers or string literals |
 | `blueprint <workdir> --out DIR` | Offline scene/asset browser, per-scope manifests, behavior and dependency evidence |
 | `rebuild <workdir> --out DIR` | Create structural draft from game_model.json; retain evidence and blockers |
+| `scene-spec <workdir> --out DIR` | One build spec per scene for the `com.uare.scenebuilder` Unity package |
+| `assetripper <root> --out DIR` | Native prefabs, AnimationClips, AnimatorControllers and sprite sheets via AssetRipper |
+| `assetripper-remap <export> --assets DIR --out DIR` | Match an AssetRipper export to source objects and restore original GUIDs |
 | `mono-decompile <managed> --out DIR` | Decompile Mono assemblies via ILSpy |
 | `il2cpp-annotate <il2cpp> --out DIR` | Merge IL2CPP names + RVAs + Ghidra into .cs stubs |
 | `recover-shaders <source> --out DIR` | Recover ShaderLab source from type-tree JSON |
@@ -111,13 +120,18 @@ The `uare` CLI handles binary format parsing and tasks that agents cannot do nat
 | `export-assets <root> --out DIR` | Object index + TextAsset + MonoScript table |
 | `il2cpp-enrich <root> --out DIR` | Il2CppDumper: RVAs + signatures + dump.cs |
 | `decompile <so> --out DIR` | Ghidra headless C decompilation |
+| `fetch-tool --url URL --dest DIR` | Download and unpack an external tool archive into `vendor/` (`--sha256` to verify) |
+| `recover-metadata <root> --out DIR` | Undo a reversible `global-metadata.dat` wrapper (XOR or `--cmd`) |
+| `unpack-native <so> --out DIR` | Identify a native packer and run an external unpacker (`--cmd`) |
 | `decrypt-hotdll <dll_dir> --out DIR` | Decrypt HybridCLR-encrypted hot-update DLLs; keys recovered from `global-metadata.dat` and verified, or pass `--keys/--key/--iv` |
 
 Each command writes to a new or empty directory through a staging folder. A failed run leaves nothing behind.
 
 ## Scope
 
-The default pipeline reads and reports. It does not patch, re-sign or repackage builds. Three **opt-in** commands cross that line only with the user's explicit input:
+The pipeline reads and reports. It does not patch, re-sign or repackage builds. Three
+decryption commands are separate steps that `run` does not call; agents run them whenever
+protection blocks analysis, without an extra confirmation:
 
 - `recover-metadata` -- undoes a reversible `global-metadata.dat` wrapper
 - `unpack-native` -- identifies a native packer and runs a user-supplied unpacker

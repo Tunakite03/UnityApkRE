@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Protocol
 
-from uare.game_model import FileRecord, Json, ModelError, ObjectRecord, identity, json_value, record
+from uare.game_model import (FileRecord, Json, ModelError, ObjectRecord, identity, json_value, non_finite_tag,
+                             record)
 
 READ_ERRORS = (EOFError, ValueError, OSError, KeyError, TypeError, AttributeError,
                NotImplementedError, RuntimeError, IndexError)
@@ -40,6 +42,9 @@ def group_objects(objects: list[UnityObject], source: str) -> dict[str, list[Uni
 def _value(value: object) -> Json:
     if isinstance(value, (bytes, bytearray)):
         return {"$binary_base64": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, float) and not math.isfinite(value):
+        # Genuine serialized values: stepped-curve tangents, unbreakable joints, unused matrix slots.
+        return non_finite_tag(value)
     if isinstance(value, (list, tuple)):
         return [_value(item) for item in value]
     if isinstance(value, dict):
@@ -74,7 +79,7 @@ def _fallback(obj: object, cls: str) -> dict[str, Json]:
                     "m_AnchoredPosition", "m_SizeDelta", "m_Pivot"):
             if hasattr(data, key):
                 vector = getattr(data, key)
-                result[key] = {axis: float(getattr(vector, axis)) for axis in "xyzw" if hasattr(vector, axis)}
+                result[key] = {axis: _value(float(getattr(vector, axis))) for axis in "xyzw" if hasattr(vector, axis)}
         return result
     if cls == "MonoBehaviour":
         return {key: _pointer(getattr(data, key)) for key in ("m_Script", "m_GameObject") if hasattr(data, key)}

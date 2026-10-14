@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from uare.errors import UareError
-from uare.game_model import GameModel, Json, ObjectRecord, Reference, load_model, outgoing
+from uare.game_model import GameModel, Json, ObjectRecord, Reference, load_model, non_finite, outgoing
 from uare.logs import event
 from uare.outdir import staged_output
 
@@ -89,6 +89,10 @@ def _text_import_path(output: str) -> str:
 
 
 def _number(value: Json, default: float) -> float:
+    spelling = non_finite(value)
+    if spelling is not None:
+        # Asset settings are JSON numbers in the builder; substituting the default would misstate the asset.
+        raise SceneSpecError(f"Asset setting holds a non-finite float the builder cannot carry; value={spelling}")
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else default
 
 
@@ -262,7 +266,11 @@ class _SpecBuilder:
 
     def _flatten(self, value: Json, unity_path: str, model_path: str, refs: dict[str, Reference],
                  rows: list[dict[str, Json]], skipped: frozenset[str] = _STRUCTURAL) -> None:
-        if isinstance(value, dict):
+        spelling = non_finite(value)
+        if spelling is not None:
+            # JSON numbers cannot hold NaN/Infinity; the builder parses the spelling from `text`.
+            rows.append(_row(unity_path, "number", text=spelling))
+        elif isinstance(value, dict):
             if "m_FileID" in value and "m_PathID" in value:
                 rows.append(self._reference_row(unity_path, refs.get(model_path)))
                 return

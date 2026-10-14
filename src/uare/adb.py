@@ -263,6 +263,62 @@ class AdbClient:
         if not local.is_file():
             raise AdbError(f"adb pull reported success but {local} does not exist")
 
+    def pidof(self, package: str) -> list[int]:
+        """Find PIDs of running package processes."""
+        validate_package_name(package)
+        result = self._device(["shell", "pidof", package], self._config.timeout_s)
+        pids: list[int] = []
+        if result.returncode == 0 and result.stdout.strip():
+            for part in result.stdout.strip().split():
+                if part.isdigit():
+                    pids.append(int(part))
+        return pids
+
+    def clear_logcat(self) -> None:
+        """Clear logcat buffer."""
+        args = ["logcat", "-c"]
+        self._require_success(args, self._device(args, self._config.timeout_s))
+
+    def build_logcat_command(self, *, tags: Sequence[str] | None = None, pid: int | None = None,
+                              dump: bool = False, lines: int | None = None,
+                              buffer: str | None = "all", format: str = "threadtime") -> list[str]:
+        """Construct full adb command line for logcat execution."""
+        cmd = [self._config.adb_path, "-s", self.serial, "logcat"]
+        if buffer:
+            cmd.extend(["-b", buffer])
+        cmd.extend(["-v", format])
+        if dump:
+            cmd.append("-d")
+        if lines is not None and lines > 0:
+            cmd.extend(["-t", str(lines)])
+        if pid is not None:
+            cmd.extend(["--pid", str(pid)])
+        if tags:
+            cmd.extend(tags)
+            cmd.append("*:S")
+        return cmd
+
+    def logcat(self, *, tags: Sequence[str] | None = None, pid: int | None = None,
+               dump: bool = False, lines: int | None = None,
+               buffer: str | None = "all", format: str = "threadtime") -> list[str]:
+        """Execute logcat and return lines."""
+        args = ["logcat"]
+        if buffer:
+            args.extend(["-b", buffer])
+        args.extend(["-v", format])
+        if dump:
+            args.append("-d")
+        if lines is not None and lines > 0:
+            args.extend(["-t", str(lines)])
+        if pid is not None:
+            args.extend(["--pid", str(pid)])
+        if tags:
+            args.extend(tags)
+            args.append("*:S")
+        result = self._device(args, self._config.timeout_s)
+        self._require_success(args, result)
+        return result.stdout.splitlines()
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()

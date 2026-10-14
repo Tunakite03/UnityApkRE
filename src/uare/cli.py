@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import platform as host
+import re
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -119,6 +121,78 @@ def cmd_packages(args: argparse.Namespace) -> int:
     for name in client.third_party_packages():
         if args.filter is None or args.filter.lower() in name.lower():
             print(name)
+    return 0
+
+
+def cmd_logcat(args: argparse.Namespace) -> int:
+    client = _adb_client(args)
+    client.select()
+    if args.clear:
+        client.clear_logcat()
+        print("logcat buffer cleared")
+        if not args.dump and not args.follow and not args.lines and not args.package and not args.out:
+            return 0
+
+    pid: int | None = None
+    if args.package:
+        pids = client.pidof(args.package)
+        if pids:
+            pid = pids[0]
+            print(f"filtering for package {args.package} (PID {pid})")
+        else:
+            print(f"package {args.package} is not running; capturing full buffer")
+
+    if args.tags:
+        tags: list[str] | None = [t.strip() for t in args.tags.split(",") if t.strip()]
+    elif args.unity_only:
+        tags = ["Unity:V"]
+    else:
+        tags = None
+
+    buffer = args.buffer
+    format_opt = args.format or "threadtime"
+    grep_re = re.compile(args.grep, re.IGNORECASE) if args.grep else None
+
+    out_file = Path(args.out) if args.out else None
+    if out_file:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    should_dump = args.dump or args.lines is not None or (not args.follow and not sys.stdout.isatty())
+    if should_dump:
+        raw_lines = client.logcat(tags=tags, pid=pid, dump=True, lines=args.lines,
+                                  buffer=buffer, format=format_opt)
+        if out_file:
+            out_file.write_text("\n".join(raw_lines) + ("\n" if raw_lines else ""), encoding="utf-8")
+            print(f"wrote {len(raw_lines)} log lines -> {out_file}")
+        matched = [l for l in raw_lines if grep_re.search(l)] if grep_re else raw_lines
+        if not out_file or grep_re:
+            for line in matched:
+                print(line)
+        return 0
+
+    cmd = client.build_logcat_command(tags=tags, pid=pid, dump=False, lines=None,
+                                      buffer=buffer, format=format_opt)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    out_handle = out_file.open("a", encoding="utf-8") if out_file else None
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if out_handle:
+                out_handle.write(line)
+                out_handle.flush()
+            if grep_re is None or grep_re.search(line):
+                sys.stdout.write(line)
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        if out_handle:
+            out_handle.close()
     return 0
 
 
@@ -465,6 +539,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_adb_options(p)
     p.add_argument("--filter", help="case-insensitive substring")
     p.set_defaults(func=cmd_packages)
+
+    p = sub.add_parser("logcat", help="capture and stream Unity Android logcat output from device")
+    _add_adb_options(p)
+    p.add_argument("package", nargs="?", help="optional package name to filter by PID")
+    p.add_argument("-b", "--buffer", default="all", help="logcat buffer to read (default: %(default)s; e.g. main,system,crash,all)")
+    p.add_argument("--format", default="threadtime", help="log output format (default: %(default)s)")
+    p.add_argument("-g", "--grep", help="regex pattern to filter lines (e.g. 'unity|firebase|perbase|crash|exception')")
+    p.add_argument("--unity-only", action="store_true", help="filter only Unity tag (Unity:V *:S)")
+    p.add_argument("--tags", help="comma-separated tags (e.g. 'Unity:V,CRASH:V')")
+    p.add_argument("-c", "--clear", action="store_true", help="clear logcat buffer first")
+    p.add_argument("-d", "--dump", action="store_true", help="dump logcat buffer and exit")
+    p.add_argument("-f", "--follow", action="store_true", help="stream live logs continuously")
+    p.add_argument("-n", "--lines", type=int, help="number of recent lines to retrieve")
+    p.add_argument("-o", "--out", help="save logs to specified file")
+    p.set_defaults(func=cmd_logcat)
 
     p = sub.add_parser("pull", help="pull all APK splits and OBBs of a package")
     _add_adb_options(p)

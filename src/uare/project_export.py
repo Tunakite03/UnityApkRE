@@ -13,7 +13,7 @@ from pathlib import Path
 
 from uare.asset_import import guid_for
 from uare.blueprint import SETTINGS_CLASSES, scene_reports
-from uare.game_model import GameModel, Json, ObjectRecord, array, record, write_json
+from uare.game_model import GameModel, Json, ObjectRecord, array, non_finite, record, write_json
 from uare.scene_convert import _CLASS_IDS, _YAML_HEADER, _SCENE_PREAMBLE
 
 
@@ -39,7 +39,7 @@ def _yaml(value: Json, indent: int) -> list[str]:
         lines: list[str] = []
         for key, item in value.items():
             encoded = key if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else json.dumps(key)
-            if isinstance(item, (dict, list)) and item:
+            if _nested(item):
                 lines.append(f"{prefix}{encoded}:")
                 lines.extend(_yaml(item, indent + 2))
             else:
@@ -48,7 +48,7 @@ def _yaml(value: Json, indent: int) -> list[str]:
     if isinstance(value, list):
         lines = []
         for item in value:
-            if isinstance(item, (dict, list)) and item:
+            if _nested(item):
                 nested = _yaml(item, indent + 2)
                 lines.append(prefix + "- " + nested[0].lstrip())
                 lines.extend(nested[1:])
@@ -58,7 +58,14 @@ def _yaml(value: Json, indent: int) -> list[str]:
     return [prefix + _scalar(value)]
 
 
+def _nested(value: Json) -> bool:
+    return isinstance(value, (dict, list)) and bool(value) and non_finite(value) is None
+
+
 def _scalar(value: Json) -> str:
+    spelling = non_finite(value)
+    if spelling is not None:
+        return spelling
     if isinstance(value, bool):
         return "1" if value else "0"
     if value is None:

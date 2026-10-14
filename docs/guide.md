@@ -366,5 +366,6 @@ Available skills:
 | `/unity-apk-re:rebuild-game` | **Main workflow** — structural evidence, behavior analysis, and project reconstruction |
 | `/unity-apk-re:analyze-apk` | Execute the extraction and analysis pipeline; interpret outputs |
 | `/unity-apk-re:pull-from-device` | Acquire APK splits from connected hardware; troubleshoot device states |
+| `/unity-apk-re:capture-device-logs` | Stream and dump Unity engine and crash diagnostics via logcat |
 | `/unity-apk-re:explore-il2cpp` | Query IL2CPP identifiers, analyze string constants, and parse report fields |
 | `/unity-apk-re:operate-and-test` | Dry-run pipelines, verify existing workspaces, and run offline test suites |

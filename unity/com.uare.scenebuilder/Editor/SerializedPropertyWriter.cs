@@ -91,12 +91,31 @@ namespace Uare.SceneBuilder.Editor
                     property.stringValue = row.text;
                     return WriteOutcome.Applied;
                 case "number":
-                    return WriteNumber(property, row.number) ? WriteOutcome.Applied : WriteOutcome.TypeMismatch;
+                {
+                    var value = NumberValue(row);
+                    if ((double.IsNaN(value) || double.IsInfinity(value)) && property.propertyType != SerializedPropertyType.Float)
+                    {
+                        return WriteOutcome.TypeMismatch;
+                    }
+
+                    return WriteNumber(property, value) ? WriteOutcome.Applied : WriteOutcome.TypeMismatch;
+                }
                 case "ref":
                     return WriteReference(property, row, objects, assets, report);
                 default:
                     throw new SceneBuildException($"Unknown property kind in scene spec; kind={row.kind}, path={row.path}");
             }
+        }
+
+        // NaN/Infinity cannot be JSON numbers, so the spec carries their spelling in `text` (validated by the reader).
+        internal static readonly IReadOnlyDictionary<string, double> NonFiniteNumbers = new Dictionary<string, double>
+        {
+            { "NaN", double.NaN }, { "Infinity", double.PositiveInfinity }, { "-Infinity", double.NegativeInfinity },
+        };
+
+        private static double NumberValue(PropertySpec row)
+        {
+            return string.IsNullOrEmpty(row.text) ? row.number : NonFiniteNumbers[row.text];
         }
 
         private static bool WriteNumber(SerializedProperty property, double value)

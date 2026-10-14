@@ -68,6 +68,7 @@ namespace Uare.SceneBuilder.Editor
     }
 
     // kind: number | string | arraySize | ref. refKind (for ref): object | asset | null | missing | unresolved.
+    // A number row with nonempty text is a non-finite float spelled "NaN", "Infinity" or "-Infinity".
     [Serializable]
     internal sealed class PropertySpec
     {
@@ -310,6 +311,11 @@ namespace Uare.SceneBuilder.Editor
                 if (!RowKinds.Contains(row.kind) || (row.kind == "ref" && !ReferenceKinds.Contains(row.refKind)))
                 {
                     throw new SceneBuildException($"Scene spec row has an unknown kind; scene={scene}, path={row.path}, kind={row.kind}, refKind={row.refKind}");
+                }
+
+                if (row.kind == "number" && !string.IsNullOrEmpty(row.text) && !SerializedPropertyWriter.NonFiniteNumbers.ContainsKey(row.text))
+                {
+                    throw new SceneBuildException($"Scene spec number row has an unknown non-finite spelling; scene={scene}, path={row.path}, text={row.text}");
                 }
 
                 if (row.kind == "ref" && row.refKind == "asset" && !assetPaths.Contains(row.refTarget))

@@ -273,6 +273,19 @@ class PackageTests(unittest.TestCase):
         catalog = json.loads((out / "catalog.json").read_text())
         self.assertEqual(len({row["object_id"] for row in catalog}), 2)
 
+    def test_non_finite_floats_are_preserved_as_tags_in_the_model(self) -> None:
+        from uare.game_model import load_model
+        joint = _Obj("HingeJoint2D", 1, "", _Pay(), typetree={
+            "m_BreakForce": float("inf"), "m_Curve": [{"inSlope": float("-inf"), "value": 0.5}], "m_Data": float("nan")})
+        ENVS[b"sprite"] = [joint]
+        _result, out = self._package()
+        model = load_model(out / "game_model.json")
+        captured = model.objects[0]
+        self.assertEqual(captured.data_status, "complete")
+        self.assertEqual(captured.data, {"m_BreakForce": {"$float": "Infinity"},
+                                         "m_Curve": [{"inSlope": {"$float": "-Infinity"}, "value": 0.5}],
+                                         "m_Data": {"$float": "NaN"}})
+
     def test_run_fails_before_pulling_when_unitypy_missing(self) -> None:
         sys.modules["UnityPy"] = None
         workdir = self.tmp / "work"

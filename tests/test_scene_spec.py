@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from uare.game_model import FileRecord, GameModel, Json, ObjectRecord, identity, resolve, save_model
@@ -105,6 +106,26 @@ class SceneSpecTests(unittest.TestCase):
         self.assertEqual(renderer["m_Enabled"]["number"], 1.0)
         self.assertEqual(renderer["m_Materials.Array.size"]["number"], 1.0)
         self.assertEqual(renderer["m_SortingLayerID"]["number"], 7.0)
+
+    def test_non_finite_floats_become_number_rows_with_their_spelling(self) -> None:
+        objects = scene_objects()
+        objects[1] = replace(objects[1], data={**objects[1].data, "m_LocalPosition": {
+            "x": {"$float": "NaN"}, "y": {"$float": "-Infinity"}, "z": 0}})
+        spec, _ = self.build(objects + shared_objects())
+        transform = props(spec["gameObjects"][0]["components"][0])
+        self.assertEqual((transform["m_LocalPosition.x"]["kind"], transform["m_LocalPosition.x"]["text"]), ("number", "NaN"))
+        self.assertEqual(transform["m_LocalPosition.y"]["text"], "-Infinity")
+        self.assertEqual((transform["m_LocalPosition.z"]["number"], transform["m_LocalPosition.z"]["text"]), (0.0, ""))
+        self.assertFalse(any("$float" in path for path in transform))
+
+    def test_non_finite_material_setting_fails_loudly(self) -> None:
+        shared = shared_objects()
+        material = shared[3]
+        props = material.data["m_SavedProperties"]
+        shared[3] = replace(material, data={**material.data, "m_SavedProperties": {
+            **props, "m_Colors": [["_Color", {"r": 0.5, "g": {"$float": "Infinity"}, "b": 1, "a": 1}]]}})
+        with self.assertRaisesRegex(SceneSpecError, "non-finite.*Infinity"):
+            self.build(scene_objects() + shared)
 
     def test_references_resolve_to_scene_objects_assets_missing_or_unresolved(self) -> None:
         spec, result = self.build(scene_objects() + shared_objects())

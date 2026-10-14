@@ -176,5 +176,60 @@ class PullPackageTests(unittest.TestCase):
                 pull_package(client(runner, retries=0), PKG, Path(tmp))
 
 
+class LogcatTests(unittest.TestCase):
+    def test_pidof_extracts_integers(self) -> None:
+        script = {
+            ("devices",): [ok("List of devices attached\nSER123\tdevice\n\n")],
+            ("shell", "pidof", PKG): [ok("1234 5678\n")],
+        }
+        c = client(FakeRunner(script, {}), retries=0)
+        c.select()
+        self.assertEqual(c.pidof(PKG), [1234, 5678])
+
+    def test_pidof_empty_when_not_running(self) -> None:
+        script = {
+            ("devices",): [ok("List of devices attached\nSER123\tdevice\n\n")],
+            ("shell", "pidof", PKG): [ok("", code=1)],
+        }
+        c = client(FakeRunner(script, {}), retries=0)
+        c.select()
+        self.assertEqual(c.pidof(PKG), [])
+
+    def test_clear_logcat_executes_c(self) -> None:
+        script = {
+            ("devices",): [ok("List of devices attached\nSER123\tdevice\n\n")],
+            ("logcat", "-c"): [ok("")],
+        }
+        c = client(FakeRunner(script, {}), retries=0)
+        c.select()
+        c.clear_logcat()
+
+    def test_build_logcat_command_with_tags_and_pid(self) -> None:
+        script = {
+            ("devices",): [ok("List of devices attached\nSER123\tdevice\n\n")],
+        }
+        c = client(FakeRunner(script, {}), retries=0)
+        c.select()
+        cmd = c.build_logcat_command(tags=["Unity:V", "CRASH:V"], pid=1234, dump=True, lines=50)
+        self.assertEqual(cmd, [
+            "adb", "-s", "SER123", "logcat", "-b", "all", "-v", "threadtime", "-d", "-t", "50", "--pid", "1234",
+            "Unity:V", "CRASH:V", "*:S"
+        ])
+
+    def test_logcat_returns_lines(self) -> None:
+        script = {
+            ("devices",): [ok("List of devices attached\nSER123\tdevice\n\n")],
+            ("logcat", "-b", "all", "-v", "threadtime", "-d", "Unity:V", "*:S"): [
+                ok("01-01 10:00:00.000 1234 1234 I Unity   : Initialize engine version: 2022.3.10f1\n"
+                   "01-01 10:00:01.000 1234 1234 I Unity   : [SceneManager] LoadScene Level1\n")
+            ],
+        }
+        c = client(FakeRunner(script, {}), retries=0)
+        c.select()
+        lines = c.logcat(tags=["Unity:V"], dump=True)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("Initialize engine version", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()

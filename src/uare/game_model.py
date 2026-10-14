@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import posixpath
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,6 +20,9 @@ from uare.errors import UareError
 
 Json: TypeAlias = "None | bool | int | float | str | list[Json] | dict[str, Json]"
 SCHEMA_VERSION = 1
+# Strict JSON has no NaN/Infinity; these floats are stored as {"$float": "<Unity YAML spelling>"}.
+NON_FINITE_KEY = "$float"
+_NON_FINITE_SPELLINGS = frozenset({"NaN", "Infinity", "-Infinity"})
 
 
 class ModelError(UareError):
@@ -36,6 +40,22 @@ def json_value(value: object, context: str) -> Json:
     if isinstance(value, dict) and all(isinstance(key, str) for key in value):
         return {key: json_value(item, context) for key, item in value.items()}
     raise ModelError(f"Cannot preserve serialized data: unsupported {type(value).__name__}; source={context}")
+
+
+def non_finite_tag(value: float) -> dict[str, Json]:
+    """Lossless JSON form of a NaN/Infinity float; the spelling matches Unity YAML and .NET invariant parsing."""
+    if math.isfinite(value):
+        raise ModelError(f"Finite float does not need a non-finite tag; value={value!r}")
+    return {NON_FINITE_KEY: json.dumps(value)}
+
+
+def non_finite(value: Json) -> str | None:
+    """Spelling of a tagged non-finite float, or None when the value is not such a tag."""
+    if isinstance(value, dict) and len(value) == 1:
+        spelling = value.get(NON_FINITE_KEY)
+        if isinstance(spelling, str) and spelling in _NON_FINITE_SPELLINGS:
+            return spelling
+    return None
 
 
 def record(value: object, context: str) -> dict[str, Json]:
@@ -175,7 +195,32 @@ def resolve(files: tuple[FileRecord, ...], objects: tuple[ObjectRecord, ...],
 
 
 def save_model(path: Path, model: GameModel) -> None:
-    write_json(path, {"schema": "uare.game-model", "schema_version": SCHEMA_VERSION, **asdict(model)})
+    # Whole-model asdict/validation/dumps each duplicate the complete object graph.
+    # Validate and encode one record at a time so large captures keep bounded writer memory.
+    sections: tuple[tuple[str, tuple[FileRecord | ObjectRecord | Reference | str, ...]], ...] = (
+        ("files", model.files), ("objects", model.objects),
+        ("references", model.references), ("issues", model.issues),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix="." + path.name + ".", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write('{\n  "schema": "uare.game-model",\n  "schema_version": ' + str(SCHEMA_VERSION))
+            for name, rows in sections:
+                handle.write(',\n  ' + json.dumps(name) + ': [\n')
+                for index, row in enumerate(rows):
+                    if index:
+                        handle.write(',\n')
+                    value = asdict(row) if isinstance(row, (FileRecord, ObjectRecord, Reference)) else row
+                    json.dump(json_value(value, str(path)), handle, ensure_ascii=True, indent=2, allow_nan=False)
+                handle.write('\n  ]')
+            handle.write('\n}\n')
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_model(path: Path) -> GameModel:

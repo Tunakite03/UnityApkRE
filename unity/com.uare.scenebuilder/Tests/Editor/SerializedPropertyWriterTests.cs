@@ -65,6 +65,28 @@ namespace Uare.SceneBuilder.Editor.Tests
         }
 
         [Test]
+        public void NonFiniteNumberRowWritesFloatsAndRejectsIntegers()
+        {
+            var gameObject = new GameObject("joint");
+            _created.Add(gameObject);
+            var joint = gameObject.AddComponent<HingeJoint2D>();
+            joint.breakForce = 5f;
+            using (var serialized = new SerializedObject(joint))
+            {
+                Assert.AreEqual(WriteOutcome.Applied,
+                    Apply(serialized, new PropertySpec { path = "m_BreakForce", kind = "number", text = "Infinity" }, new SceneBuildReport(), NoObjects));
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+            }
+
+            Assert.IsTrue(float.IsPositiveInfinity(joint.breakForce));
+            using (var serialized = new SerializedObject(Fixture()))
+            {
+                Assert.AreEqual(WriteOutcome.TypeMismatch,
+                    Apply(serialized, new PropertySpec { path = "unsignedId", kind = "number", text = "NaN" }, new SceneBuildReport(), NoObjects));
+            }
+        }
+
+        [Test]
         public void MaterialArraySizeOfABuiltInRendererIsWritten()
         {
             var gameObject = new GameObject("renderer");

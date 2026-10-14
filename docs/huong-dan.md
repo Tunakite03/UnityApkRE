@@ -361,5 +361,6 @@ Các skill có sẵn:
 | `/unity-apk-re:rebuild-game`     | **Quy trình chính** -- từ APK đến Unity project, có checkpoint hỏi user |
 | `/unity-apk-re:analyze-apk`      | Chạy pipeline phân tích và giải thích kết quả         |
 | `/unity-apk-re:pull-from-device` | Lấy APK từ điện thoại, xử lý lỗi kết nối thiết bị    |
+| `/unity-apk-re:capture-device-logs` | Bắt và phân tích log Unity runtime, crash trace qua logcat |
 | `/unity-apk-re:explore-il2cpp`   | Tìm tên class/method/chuỗi, giải thích `report.json` |
 | `/unity-apk-re:operate-and-test` | Chạy thử/kiểm tra không cần điện thoại               |

@@ -73,6 +73,7 @@ Behavior analysis and observations use the contracts in the rebuild skill and
 | `/unity-apk-re:rebuild-game` | **Main workflow** -- structural evidence, behavior analysis, reconstruction and verification |
 | `/unity-apk-re:analyze-apk` | Extraction and analysis pipeline, from a phone or local files |
 | `/unity-apk-re:pull-from-device` | Pulling APK splits and OBBs, fixing device states |
+| `/unity-apk-re:capture-device-logs` | Streaming and dumping Unity runtime logs and crash diagnostics via logcat |
 | `/unity-apk-re:explore-il2cpp` | Searching IL2CPP names and string literals, reading report.json |
 | `/unity-apk-re:operate-and-test` | Dry-run planning, offline tests, verifying existing outputs |
 
@@ -145,6 +146,7 @@ Layout:
   - `rebuild-game/` -- main evidence-backed reconstruction workflow
   - `analyze-apk/` -- extraction and analysis pipeline
   - `pull-from-device/` -- APK pulling from device
+  - `capture-device-logs/` -- runtime logcat capture and filtering
   - `explore-il2cpp/` -- IL2CPP name exploration
   - `operate-and-test/` -- testing and verification
 - `.claude-plugin/` -- plugin and marketplace manifests

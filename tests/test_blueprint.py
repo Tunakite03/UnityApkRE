@@ -8,7 +8,7 @@ from pathlib import Path
 from uare.blueprint import blueprint, build_report, scene_reports
 from uare.game_model import (FileRecord, GameModel, Json, ModelError, ObjectRecord,
                             closure, identity, load_model, outgoing, resolve, save_model)
-from uare.project_export import Binding, export_project
+from uare.project_export import Binding, _yaml, export_project
 from uare.rebuild import rebuild
 from uare.asset_import import guid_for, meta_content
 
@@ -257,6 +257,12 @@ class ProjectExportTests(unittest.TestCase):
             self.assertIn("m_IsActive: 0", scene)
             self.assertNotIn("m_PathID", scene)
             self.assertTrue(any(b.get("field") == "missing" for b in result.blockers))
+
+    def test_yaml_writes_non_finite_tags_with_unity_spelling(self) -> None:
+        lines = _yaml({"m_BreakForce": {"$float": "Infinity"}, "m_Pos": {"x": {"$float": "NaN"}, "y": 1},
+                       "m_Slopes": [{"$float": "-Infinity"}, 0.5]}, 0)
+        self.assertEqual(lines, ["m_BreakForce: Infinity", "m_Pos:", "  x: NaN", "  y: 1",
+                                 "m_Slopes:", "  - -Infinity", "  - 0.5"])
 
     def test_real_script_and_media_bindings_match_generated_meta_guids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

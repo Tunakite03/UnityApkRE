@@ -23,6 +23,7 @@ from uare.apk import extract_apk_set
 from uare.assets import analyze_assets, summarize_assets
 from uare.elf import inspect_elf
 from uare.errors import ElfFormatError, UareError
+from uare.external import DEFAULT_TIMEOUT_S as CMD_TIMEOUT_S
 from uare.external import run_command
 from uare.ghidra import DEFAULT_VENDOR_ROOT as GHIDRA_VENDOR_ROOT
 from uare.ghidra import decompile, resolve_ghidra
@@ -289,7 +290,7 @@ def cmd_recover_metadata(args: argparse.Namespace) -> int:
     metadata = _metadata_path(args)
     if not metadata.is_file():
         raise UareError(f"{metadata} not found; this build has no IL2CPP metadata (Mono or non-Unity?)")
-    result = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd)
+    result = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd, command_timeout_s=args.cmd_timeout)
     version = header_version(result.data)
     out_dir = Path(args.out)
     with staged_output(out_dir) as staging:
@@ -309,7 +310,8 @@ def cmd_dump_il2cpp(args: argparse.Namespace) -> int:
     with staged_output(out_dir) as staging:
         source = metadata
         if args.decrypt or args.key or args.cmd:
-            recovery = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd)
+            recovery = recover_file(metadata, key=_key_bytes(args.key), command=args.cmd,
+                                    command_timeout_s=args.cmd_timeout)
             source = staging / "global-metadata.recovered.dat"
             source.write_bytes(recovery.data)
             print(f"metadata recovered via {recovery.scheme} -> {source.name}")
@@ -352,7 +354,7 @@ def cmd_unpack_native(args: argparse.Namespace) -> int:
         print("no --cmd given, so nothing was unpacked. Pass --cmd with a game-specific unpacker "
               "(for example a Frida memory-dump script) that writes the clean .so to {output}.")
         return 0
-    data = run_command(args.cmd, so.read_bytes())
+    data = run_command(args.cmd, so.read_bytes(), args.cmd_timeout)
     name = Path(args.name).name if args.name else so.name
     out_dir = Path(args.out)
     with staged_output(out_dir) as staging:
@@ -431,7 +433,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     from uare.rebuild import summarize as summarize_rebuild
     result = rebuild(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets)
     print("\n".join(summarize_rebuild(result)))
-    return 0
+    return 1 if result.steps_failed else 0
 
 
 def cmd_scene_spec(args: argparse.Namespace) -> int:
@@ -505,7 +507,8 @@ def cmd_decrypt_hotdll(args: argparse.Namespace) -> int:
         magic=magic if args.magic is not None else (b"" if args.no_magic else None),
         keys_file=Path(args.keys) if args.keys else None)
     print("\n".join(summarize_hotdll(result)))
-    return 0
+    # Any assembly left encrypted makes the run incomplete; the output is kept for inspection.
+    return 1 if any(f["status"] != "decrypted" for f in result.files) else 0
 
 
 def _bytes_arg(value: str | None) -> bytes | None:
@@ -539,6 +542,11 @@ def _add_adb_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=120.0, help="timeout for non-transfer adb commands (s)")
     parser.add_argument("--pull-timeout", type=float, default=7200.0, help="timeout for each adb pull (s)")
     parser.add_argument("--retries", type=int, default=2, help="retries for transient adb failures")
+
+
+def _add_cmd_timeout(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cmd-timeout", type=float, default=CMD_TIMEOUT_S,
+                   help=f"seconds before --cmd is killed (default {CMD_TIMEOUT_S:g})")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -621,12 +629,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--decrypt", action="store_true", help="recover encrypted/obfuscated metadata before dumping")
     p.add_argument("--key", help="hex XOR key for metadata recovery")
     p.add_argument("--cmd", help="external metadata decryptor ({input}/{output} placeholders, or stdout)")
+    _add_cmd_timeout(p)
     p.set_defaults(func=cmd_dump_il2cpp)
 
     p = sub.add_parser("unpack-native", help="identify a native packer and optionally run an external unpacker")
     p.add_argument("so", help="path to libil2cpp.so (or any native library)")
     p.add_argument("--out", required=True, help="empty directory for the unpacked .so + elf_report.json")
     p.add_argument("--cmd", help="external unpacker ({input}/{output} placeholders, or stdout)")
+    _add_cmd_timeout(p)
     p.add_argument("--name", help="output file name (default: input file name)")
     p.set_defaults(func=cmd_unpack_native)
 
@@ -681,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--metadata", help="path to global-metadata.dat (default: under root)")
     p.add_argument("--key", help="hex XOR key")
     p.add_argument("--cmd", help="external decryptor ({input}/{output} placeholders, or stdout)")
+    _add_cmd_timeout(p)
     p.set_defaults(func=cmd_recover_metadata)
 
     p = sub.add_parser("export-assets", help="object index + TextAsset bytes + MonoScript table")

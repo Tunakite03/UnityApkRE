@@ -27,8 +27,11 @@ class _Pay:
 
 
 class _Image:
-    def save(self, path):
-        Path(path).write_bytes(b"\x89PNG")
+    def save(self, fp, format=None):  # PIL accepts a path or a binary file object
+        if hasattr(fp, "write"):
+            fp.write(b"\x89PNG")
+        else:
+            Path(fp).write_bytes(b"\x89PNG")
 
 
 class _Type:
@@ -548,6 +551,41 @@ class LayoutTests(unittest.TestCase):
 
     def test_atlas_pages_are_the_name_lines_of_page_blocks_only(self) -> None:
         self.assertEqual(pt._atlas_pages(ATLAS_TEXT), ["hero.png", "hero mid.png", "missing.png"])
+
+    def test_spine_page_name_with_a_path_cannot_link_outside_its_folder(self) -> None:
+        hostile = "../../../../escape.png\nsize: 4,4\nformat: RGBA8888\nfilter: Linear,Linear\nrepeat: none\n"
+        objects = _spine_objects()
+        objects[5] = _Obj("TextAsset", 34, "hero.atlas", _Pay(m_Script=hostile.encode("utf-8")))
+        objects.append(_Obj("Texture2D", 38, "escape", _Pay(m_Width=4, m_Height=4, image=_Image())))
+        self._bundle("spine", _in_file("CAB-spine", objects))
+        _result, out = self._package()
+        folder = next(out.glob("spines/**/hero_SkeletonData"))
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual([(row["status"], row["link"]) for row in manifest["pages"]], [("linked", "escape.png")])
+        self.assertTrue((folder / "escape.png").is_file())
+        self.assertEqual([p for p in self.tmp.rglob("escape.png") if out not in p.parents], [])
+
+    def test_names_that_collide_after_their_extension_is_added_get_distinct_files(self) -> None:
+        clip = _Pay(samples={"a.wav": b"RIFF1", "b.wav": b"RIFF2"})
+        self._bundle("collide", _in_file("CAB-collide", [
+            _Obj("TextAsset", 50, "config", _Pay(m_Script=b"first")),
+            _Obj("TextAsset", 51, "config.txt", _Pay(m_Script=b"second")),
+            _Obj("AudioClip", 52, "bgm", clip),
+            _Obj("AudioClip", 53, "bgm_1", _Pay(samples={"c.wav": b"RIFF3"})),
+        ]))
+        _result, out = self._package()
+        catalog = {e["path_id"]: e for e in json.loads((out / "catalog.json").read_text(encoding="utf-8"))}
+        outputs = [catalog[pid]["output"] for pid in (50, 51, 52, 53)]
+        self.assertEqual(len(set(outputs)), 4, outputs)
+        self.assertEqual((out / outputs[0]).read_bytes(), b"first")
+        self.assertEqual((out / outputs[1]).read_bytes(), b"second")
+        self.assertEqual((out / outputs[3]).read_bytes(), b"RIFF3")
+        self.assertEqual((out / outputs[2]).with_name("bgm_1.wav").read_bytes(), b"RIFF2")
+
+    def test_catalog_page_escapes_every_value_before_innerhtml(self) -> None:
+        for field in ("class_name", "name", "category", "source", "note"):
+            self.assertNotIn("${x." + field, pt._INDEX_HTML)
+            self.assertIn(f"e(x.{field})", pt._INDEX_HTML)
 
 
 if __name__ == "__main__":

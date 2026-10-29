@@ -206,7 +206,7 @@ scripts/uare unpack-native re/rollinghero/extracted/lib/arm64-v8a/libil2cpp.so -
 
 - `recover-metadata`: Tests 1-byte XOR, short-key XOR (1–4 bytes derived from expected magic), user keys via `--key`, or external transformation commands via `--cmd`. Only payloads yielding valid `0xFAB11BAF` magic are accepted.
 - `unpack-native`: Detects known mobile packers (SecNeo, Bangcle, 360 Jiagu, Tencent Legu, DingDong, Baidu). Real memory dumping requires `--cmd` (e.g., Frida or custom dumper). The tool validates the unpacked result by remeasuring code entropy.
-- Command templates use `{input}` and `{output}` placeholders and execute directly without shell string interpolation.
+- Command templates use `{input}` and `{output}` placeholders and execute directly without shell string interpolation. `--cmd-timeout` (default 1800 s) kills a command that does not finish.
 
 ## Step 9: Clean Binary Analysis (Enrichment, Decompilation, UnityPy)
 
@@ -238,10 +238,10 @@ Output deliverables:
 | Command | Output Files |
 | --- | --- |
 | `il2cpp-enrich` | `methods_rva.tsv` (`rva, class, method, signature`), `dump.cs`, `il2cpp.h`, `enrich_report.json` |
-| `decompile` | `functions.tsv` (`address, name, size`), `decompiled/*.c` |
+| `decompile` | `functions.tsv` (`address, name, size`), `decompiled/*.c`, `decompile-failures.tsv` (functions Ghidra could not decompile; the export continues) |
 | `export-assets --backend unitypy` | `objects.jsonl`, `textassets/`, `textures/` (PNG), `audio/` (WAV), `meshes/` (OBJ), `monobehaviours/` (JSON), `monoscripts.tsv` |
 
-- `il2cpp-enrich` invokes Il2CppDumper with CLI syntax `Il2CppDumper <libil2cpp.so> <global-metadata.dat> <out_dir>`. Tool discovery order: `--dumper`, `UARE_IL2CPP_DUMPER`, `vendor/il2cpp-dumper/`, PATH.
+- `il2cpp-enrich` invokes Il2CppDumper with CLI syntax `Il2CppDumper <libil2cpp.so> <global-metadata.dat> <out_dir>`. Tool discovery order: `--dumper`, `UARE_IL2CPP_DUMPER`, `vendor/il2cpp-dumper/`, PATH. A run that writes no `script.json` or no method addresses fails with the dumper's console output, even when the dumper exits 0.
 - `decompile` launches `analyzeHeadless` using a dedicated Java post-analysis script (eliminating Jython dependencies). The wrapper script under `vendor/ghidra/analyzeHeadless` configures the bundled JDK 21. See [docs/agent-tools.md](agent-tools.md) for local environment details.
 - Function addresses in `functions.tsv` match RVAs in `methods_rva.tsv`, allowing seamless correlation between C# declarations and Ghidra decompilation.
 
@@ -308,7 +308,7 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
   4. Accepts a candidate key only when the decrypted output yields a **valid PE/COFF header** and valid PKCS#7 padding.
 - Does not require `libil2cpp.so`—keys are recovered entirely from metadata constants.
 - Pure Python fallback included; install the `crypto` extra into `.venv-power` (`"<plugin-root>[power,crypto]"`) for PyCryptodome acceleration.
-- Generates `decrypted/*.dll` (decompilable via ILSpy), `keys.json` (reusable with `--keys`), and `report.json`.
+- Generates `decrypted/*.dll` (decompilable via ILSpy; already-plain DLLs are copied alongside), `keys.json` (reusable with `--keys`), and `report.json`. Key material is written only to `keys.json`, never to the console or `report.json`. The command exits 1 when any assembly stays encrypted.
 - Custom algorithms can be specified explicitly: `--algo <cipher> --key <hex> --iv <hex> --magic <hex>`.
 
 ## Step 12: Rebuild Scenes One at a Time in Your Own Unity Project (`scene-spec` + scene builder)

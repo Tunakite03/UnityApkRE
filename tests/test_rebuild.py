@@ -136,6 +136,32 @@ class RebuildTests(unittest.TestCase):
             meta_files = list((out / "Assets").rglob("*.meta"))
             self.assertGreater(len(meta_files), 0)
 
+    def test_failed_optional_step_is_reported_and_the_cli_exits_1(self):
+        from unittest import mock
+        from uare.cli import main
+        from uare.errors import UareError
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir) / "work"
+            _setup_workdir(workdir)
+            out = Path(tmpdir) / "project"
+            with mock.patch("uare.shader_recover.recover_shaders", side_effect=UareError("bad shader dir")):
+                rc = main(["rebuild", str(workdir), "--out", str(out)])
+            self.assertEqual(rc, 1)
+            report = json.loads((out / "rebuild_report.json").read_text())
+            self.assertEqual(report["failed_steps"], [{"step": "shader_recovery", "error": "UareError: bad shader dir"}])
+
+    def test_meta_generation_failure_fails_the_rebuild_and_leaves_no_project(self):
+        from unittest import mock
+        from uare.errors import UareError
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir) / "work"
+            _setup_workdir(workdir)
+            out = Path(tmpdir) / "project"
+            with mock.patch("uare.asset_import.generate_meta_tree", side_effect=UareError("disk full")):
+                with self.assertRaisesRegex(UareError, "disk full"):
+                    rebuild(workdir, out, workdir / "extracted-assets")
+            self.assertFalse(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

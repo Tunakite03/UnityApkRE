@@ -162,8 +162,8 @@ def _export_audio(obj: Any, name: str, path_id: int, out_dir: Path, used: set[st
         if not payload:
             continue
         suffix = Path(clip_name).suffix or ".wav"
-        target = out_dir / _stem(Path(clip_name).stem or name or f"Audio_{path_id}", path_id + written, used)
-        target = target.with_suffix(suffix)
+        # Append the suffix: with_suffix() would replace a disambiguating ".<counter>" and reuse the name.
+        target = out_dir / (_stem(Path(clip_name).stem or name or f"Audio_{path_id}", path_id + written, used) + suffix)
         target.write_bytes(_as_bytes(payload))
         written += 1
     return written

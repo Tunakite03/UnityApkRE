@@ -200,7 +200,7 @@ scripts/uare unpack-native .../libil2cpp.so --out re/rollinghero/unpacked --cmd 
 
 - `recover-metadata` thử: XOR 1 byte, XOR key ngắn (1–4 byte, suy ra từ magic), `--key` bạn đưa, hoặc `--cmd`. Chỉ chấp nhận nếu ra đúng magic `0xFAB11BAF`; không đoán.
 - `unpack-native` chỉ dò chữ ký packer đã biết (SecNeo, Bangcle, 360 Jiagu, Tencent Legu, DingDong, Baidu...). Muốn thực sự mở thì phải tự đưa `--cmd` (unpacker theo từng game). Công cụ chạy command đó, rồi đo lại entropy để nói binary đã sạch chưa.
-- Command ngoài dùng `{input}`/`{output}`; không có `{output}` thì lấy stdout. Không đi qua shell.
+- Command ngoài dùng `{input}`/`{output}`; không có `{output}` thì lấy stdout. Không đi qua shell. `--cmd-timeout` (mặc định 1800 giây) sẽ kill command chạy quá hạn.
 
 ### Bước 9: mở rộng khi binary **không** bị pack — enrich, decompile, UnityPy
 
@@ -232,7 +232,7 @@ Kết quả:
 | Lệnh | File |
 |---|---|
 | `il2cpp-enrich` | `methods_rva.tsv` (`rva, class, method, signature`), `dump.cs`, `il2cpp.h`, `enrich_report.json` |
-| `decompile` | `functions.tsv` (`địa chỉ, tên, kích thước`), `decompiled/*.c` |
+| `decompile` | `functions.tsv` (`địa chỉ, tên, kích thước`), `decompiled/*.c`, `decompile-failures.tsv` (hàm Ghidra không decompile được; export vẫn chạy tiếp) |
 | `export-assets --backend unitypy` | `objects.jsonl`, `textassets/`, `textures/` (PNG), `audio/` (WAV), `meshes/` (OBJ), `monobehaviours/` (JSON), `monoscripts.tsv` |
 
 - `il2cpp-enrich` gọi dumper đúng convention `Il2CppDumper <libil2cpp.so> <global-metadata.dat> <out_dir>`. Tìm tool theo thứ tự: `--dumper`, `UARE_IL2CPP_DUMPER`, `vendor/il2cpp-dumper/`, PATH.
@@ -297,7 +297,7 @@ scripts/uare decrypt-hotdll "<workdir>/extracted-assets/scripts/hotdll" --out "<
 
 - Công cụ gom **mọi mảng constant** từ metadata, **tự kiểm chứng từng mảng bằng SHA-256 lấy từ tên field** (không đoán), rồi thử lần lượt AES-128-CBC / AES-128-GCM / ChaCha20 / RC4 / XOR với các độ dài magic thường gặp. Một tổ hợp chỉ được chấp nhận khi **cả file nhỏ nhất giải ra đúng PE** (và padding PKCS#7 khớp với CBC); không tìm được thì báo lỗi, không đoán.
 - Không cần `libil2cpp.so` — key nằm hoàn toàn trong metadata. Không cần cài thêm gì (AES/RC4/ChaCha20 có bản thuần Python); cài thêm extra `crypto` vào `.venv-power` (`"<plugin-root>[power,crypto]"`) để chạy nhanh hơn với pycryptodome.
-- Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`.
+- Kết quả: `decrypted/*.dll` (PE .NET, mở bằng ILSpy/dnSpy được ngay; DLL vốn đã plain cũng được copy vào), `keys.json` (algo + key + iv + magic để chạy lại bằng `--keys`, không cần tìm lại) và `report.json`. Key chỉ nằm trong `keys.json`, không in ra console hay `report.json`. Lệnh trả exit code 1 nếu còn DLL chưa giải mã được.
 - Nếu game dùng thuật toán riêng: đưa key trực tiếp qua `--algo --key --iv --magic`.
 
 ### Bước 12: dựng lại từng scene vào project Unity của bạn — `scene-spec` + scene builder

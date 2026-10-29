@@ -33,6 +33,9 @@ rebuild_report.json
 ProjectVersion contains the selected detected version, without an invented
 revision hash. Player settings are draft defaults, not recovered project settings.
 The report records unverified regional version normalization where applicable.
+`rebuild_report.json` lists optional steps that failed (decompilation, IL2CPP merge,
+shader recovery, Wwise) under `failed_steps`, and `rebuild` then exits 1. A `.meta`
+generation failure fails the whole rebuild because the draft already references those GUIDs.
 
 Package versions are never derived from SDK names. An optional workdir-level
 `rebuild-packages.json` supplies explicit registry versions under `dependencies`.

@@ -123,7 +123,8 @@ def resolve_dumper(explicit: str | None, environ: Mapping[str, str], vendor_root
     )
 
 
-def run_dumper(dumper: str, so: Path, metadata: Path, work_dir: Path, timeout: float) -> None:
+def run_dumper(dumper: str, so: Path, metadata: Path, work_dir: Path, timeout: float) -> str:
+    """Run the dumper and return the tail of its console output (it reports most failures there)."""
     argv = [dumper, str(so), str(metadata), str(work_dir)]
     event(LOG, logging.INFO, "dumper_run", dumper=dumper, so=str(so))
     try:
@@ -132,6 +133,7 @@ def run_dumper(dumper: str, so: Path, metadata: Path, work_dir: Path, timeout: f
         raise Il2CppToolsError(f"could not run {dumper}: {exc}") from exc
     if proc.returncode != 0:
         raise Il2CppToolsError(f"{dumper} exited {proc.returncode}: {(proc.stderr or proc.stdout)[-_MAX_STDERR:]}")
+    return ((proc.stdout or "") + (proc.stderr or ""))[-_MAX_STDERR:]
 
 
 def _default_so(layout) -> Path | None:
@@ -154,10 +156,16 @@ def enrich(root: Path, out_dir: Path, dumper: ResolvedDumper, *, so: Path | None
     with staged_output(out_dir) as staging:
         work = staging / "dumper"
         work.mkdir()
-        run_dumper(dumper.path, so_path, metadata_path, work, timeout)
+        console = run_dumper(dumper.path, so_path, metadata_path, work, timeout)
 
+        # Il2CppDumper reports many failures on its console and still exits 0; an empty
+        # method table is a failed dump, not a binary without methods.
         script = work / "script.json"
-        methods = parse_script_json(script) if script.is_file() else []
+        if not script.is_file():
+            raise Il2CppToolsError(f"{dumper.path} exited 0 but wrote no script.json: {console!r}")
+        methods = parse_script_json(script)
+        if not methods:
+            raise Il2CppToolsError(f"{dumper.path} wrote a script.json without method addresses: {console!r}")
         with (staging / "methods_rva.tsv").open("w", encoding="utf-8") as handle:
             for method in methods:
                 handle.write(f"0x{method.address:X}\t{method.class_name}\t{method.method}\t{method.signature}\n")

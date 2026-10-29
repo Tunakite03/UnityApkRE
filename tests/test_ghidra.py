@@ -25,6 +25,8 @@ with open(os.path.join(out, "functions.tsv"), "w") as f:
 if "decompile" in sys.argv:
     with open(os.path.join(out, "decompiled", "0x100000_ShopPage_Buy.c"), "w") as f:
         f.write("void ShopPage_Buy(void){{}}\\n")
+    with open(os.path.join(out, "decompile-failures.tsv"), "w") as f:
+        f.write("00100100\\tPlayer_Update\\tDecompiler process died\\n")
 with open(os.path.join(out, "export-complete.txt"), "w") as f:
     f.write("complete\\n")
 """
@@ -49,6 +51,9 @@ class GhidraTests(unittest.TestCase):
         text = path.read_text()
         self.assertIn("getScriptArgs", text)
         self.assertIn("functions.tsv", text)
+        # A function that cannot be decompiled is recorded; it must not abort the export.
+        self.assertIn("decompile-failures.tsv", text)
+        self.assertNotIn("Decompilation failed at", text)
 
     def test_build_command_shape(self) -> None:
         argv = build_command("/opt/ghidra/analyzeHeadless", Path("/proj"), Path("/x.so"),
@@ -74,6 +79,7 @@ class GhidraTests(unittest.TestCase):
         result = decompile(so, out, resolved, decompile_functions=True)
         self.assertEqual(result.functions, 2)
         self.assertEqual(result.decompiled, 1)
+        self.assertEqual(result.failed, 1)
         self.assertTrue((out / "functions.tsv").is_file())
         self.assertEqual(len(list((out / "decompiled").glob("*.c"))), 1)
 

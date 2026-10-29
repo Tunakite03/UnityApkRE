@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from uare.errors import Il2CppMetadataError
-from uare.external import run_command
+from uare.external import DEFAULT_TIMEOUT_S, run_command
 from uare.il2cpp import METADATA_MAGIC
 from uare.logs import event
 
@@ -70,7 +70,8 @@ def _candidate_keys(data: bytes) -> list[tuple[str, bytes]]:
     return keys
 
 
-def recover(data: bytes, *, key: bytes | None = None, command: str | None = None) -> Recovery:
+def recover(data: bytes, *, key: bytes | None = None, command: str | None = None,
+            command_timeout_s: float = DEFAULT_TIMEOUT_S) -> Recovery:
     """Return the recovered metadata bytes and the scheme that worked, or raise."""
     if header_version(data) is not None:
         return Recovery(data, "identity")
@@ -82,7 +83,7 @@ def recover(data: bytes, *, key: bytes | None = None, command: str | None = None
             return Recovery(candidate, "xor-key")
 
     if command:
-        candidate = run_command(command, data)
+        candidate = run_command(command, data, command_timeout_s)
         if header_version(candidate) is not None:
             event(LOG, logging.INFO, "metadata_recovered", scheme="external")
             return Recovery(candidate, "external")
@@ -101,7 +102,8 @@ def recover(data: bytes, *, key: bytes | None = None, command: str | None = None
         "Supply --key (hex) or --cmd with a game-specific decryptor.")
 
 
-def recover_file(path: Path, *, key: bytes | None = None, command: str | None = None) -> Recovery:
+def recover_file(path: Path, *, key: bytes | None = None, command: str | None = None,
+                 command_timeout_s: float = DEFAULT_TIMEOUT_S) -> Recovery:
     if not path.is_file():
         raise Il2CppMetadataError(f"{path} does not exist")
-    return recover(path.read_bytes(), key=key, command=command)
+    return recover(path.read_bytes(), key=key, command=command, command_timeout_s=command_timeout_s)

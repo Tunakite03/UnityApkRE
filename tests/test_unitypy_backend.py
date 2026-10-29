@@ -128,6 +128,16 @@ class UnityPyBackendTests(unittest.TestCase):
             else:
                 sys.modules["UnityPy"] = saved
 
+    def test_same_named_audio_clips_keep_their_disambiguated_file_names(self) -> None:
+        out = self.tmp / "audio"
+        out.mkdir()
+        used: set[str] = set()
+        for path_id, payload in ((7, b"RIFF1"), (8, b"RIFF2")):
+            clip = _FakeObj("AudioClip", path_id, "bgm", _Pay(samples={"bgm.wav": payload}))
+            unitypy_backend._export_audio(clip, "bgm", path_id, out, used)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["bgm.8.wav", "bgm.wav"])
+        self.assertEqual((out / "bgm.wav").read_bytes(), b"RIFF1")
+
     def test_forced_stdlib_backend_ignores_unitypy(self) -> None:
         from uare.cli import main
         self.assertEqual(

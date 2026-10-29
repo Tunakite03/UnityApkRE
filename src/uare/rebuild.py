@@ -80,6 +80,7 @@ class RebuildResult:
     native_plugins: int
     other_assets: int
     steps_run: tuple[str, ...]
+    steps_failed: tuple[str, ...]
     warnings: tuple[str, ...]
 
 
@@ -240,7 +241,18 @@ def _copy_streaming_assets(extracted_dir: Path, project: Path) -> int:
     return 0
 
 
-def _run_mono_decompile(extracted_dir: Path, project: Path, warnings: list[str]) -> int:
+# Optional steps add code or media evidence to the draft. Their expected failures are recorded as
+# failed steps (the command then exits 1); anything else is a bug and propagates.
+_STEP_ERRORS = (UareError, OSError)
+
+
+def _record_failure(failed: list[dict[str, str]], step: str, exc: Exception) -> None:
+    failed.append({"step": step, "error": f"{type(exc).__name__}: {exc}"})
+    event(LOG, logging.WARNING, "rebuild_step_failed", step=step, error_type=type(exc).__name__)
+
+
+def _run_mono_decompile(extracted_dir: Path, project: Path, warnings: list[str],
+                        failed: list[dict[str, str]]) -> int:
     managed = extracted_dir / "Data" / "Managed"
     if not managed.is_dir():
         warnings.append("Managed/ directory not found; skipping Mono decompilation")
@@ -254,12 +266,12 @@ def _run_mono_decompile(extracted_dir: Path, project: Path, warnings: list[str])
         result = decompile_all(managed, scripts_dir, decompiler)
         event(LOG, logging.INFO, "mono_decompiled", assemblies=result.decompiled, files=result.total_cs_files)
         return result.total_cs_files
-    except Exception as exc:
-        warnings.append(f"Mono decompilation failed: {exc}")
+    except _STEP_ERRORS as exc:
+        _record_failure(failed, "mono_decompile", exc)
         return 0
 
 
-def _run_il2cpp_merge(workdir: Path, project: Path, warnings: list[str]) -> int:
+def _run_il2cpp_merge(workdir: Path, project: Path, warnings: list[str], failed: list[dict[str, str]]) -> int:
     il2cpp_dir = workdir / "il2cpp"
     if not il2cpp_dir.is_dir() or not (il2cpp_dir / "types.tsv").is_file():
         il2cpp_dir = workdir / "analysis" / "il2cpp"
@@ -275,12 +287,13 @@ def _run_il2cpp_merge(workdir: Path, project: Path, warnings: list[str]) -> int:
         warnings.append("IL2CPP annotations are code evidence under Reconstruction/, not recovered executable scripts.")
         event(LOG, logging.INFO, "il2cpp_merged", types=result.types, methods=result.methods_total)
         return result.files_written
-    except Exception as exc:
-        warnings.append(f"IL2CPP merge failed: {exc}")
+    except _STEP_ERRORS as exc:
+        _record_failure(failed, "il2cpp_merge", exc)
         return 0
 
 
-def _run_shader_recovery(assets_dir: Path, project: Path, warnings: list[str]) -> int:
+def _run_shader_recovery(assets_dir: Path, project: Path, warnings: list[str],
+                         failed: list[dict[str, str]]) -> int:
     try:
         from uare.shader_recover import recover_shaders
         shaders_dir = project / "Assets" / "Shaders"
@@ -290,8 +303,8 @@ def _run_shader_recovery(assets_dir: Path, project: Path, warnings: list[str]) -
         event(LOG, logging.INFO, "shaders_recovered_rebuild",
               original=result.recovered_original, reconstructed=result.recovered_parsed)
         return result.recovered_original + result.recovered_parsed
-    except Exception as exc:
-        warnings.append(f"Shader recovery failed: {exc}")
+    except _STEP_ERRORS as exc:
+        _record_failure(failed, "shader_recovery", exc)
         return 0
 
 
@@ -306,21 +319,19 @@ def _run_scene_convert(assets_dir: Path, project: Path, warnings: list[str]) -> 
         return 0, 0
 
 
-def _run_meta_generation(project: Path, warnings: list[str]) -> int:
+def _run_meta_generation(project: Path) -> int:
+    """Not optional: scenes and prefabs already reference the GUIDs these .meta files define,
+    so a failure here fails the rebuild instead of leaving dangling references."""
     assets_root = project / "Assets"
     if not assets_root.is_dir():
         return 0
-    try:
-        from uare.asset_import import generate_meta_tree
-        result = generate_meta_tree(assets_root)
-        event(LOG, logging.INFO, "meta_generated_rebuild", meta=result.meta_written)
-        return result.meta_written
-    except Exception as exc:
-        warnings.append(f".meta generation failed: {exc}")
-        return 0
+    from uare.asset_import import generate_meta_tree
+    result = generate_meta_tree(assets_root)
+    event(LOG, logging.INFO, "meta_generated_rebuild", meta=result.meta_written)
+    return result.meta_written
 
 
-def _run_wwise_extract(extracted_dir: Path, project: Path, warnings: list[str]) -> int:
+def _run_wwise_extract(extracted_dir: Path, project: Path, failed: list[dict[str, str]]) -> int:
     bnk_dirs = [extracted_dir / "assets", extracted_dir / "Data" / "StreamingAssets"]
     for d in bnk_dirs:
         if d.is_dir() and list(d.rglob("*.bnk")):
@@ -329,8 +340,8 @@ def _run_wwise_extract(extracted_dir: Path, project: Path, warnings: list[str]) 
                 wwise_out = project / "Assets" / "Wwise"
                 result = extract_all(d, wwise_out)
                 return result.total_wems
-            except Exception as exc:
-                warnings.append(f"Wwise extraction failed: {exc}")
+            except _STEP_ERRORS as exc:
+                _record_failure(failed, "wwise_extract", exc)
                 return 0
     return 0
 
@@ -355,6 +366,7 @@ def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
     if unity_version not in report.get("inventory", {}).get("unity_versions", {}):
         warnings.append("Selected Editor version normalizes a regional release; compatibility has not been verified.")
     steps: list[str] = []
+    failed: list[dict[str, str]] = []
 
     with staged_output(out_dir) as project:
         write_blueprint(workdir, project / "Reconstruction" / "Blueprint", model)
@@ -382,15 +394,15 @@ def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
         scripts = 0
         code_evidence_files = 0
         if backend == "mono":
-            scripts = _run_mono_decompile(extracted_dir, project, warnings)
+            scripts = _run_mono_decompile(extracted_dir, project, warnings, failed)
             if scripts:
                 steps.append("mono_decompile")
         elif backend == "il2cpp":
-            code_evidence_files = _run_il2cpp_merge(workdir, project, warnings)
+            code_evidence_files = _run_il2cpp_merge(workdir, project, warnings, failed)
             if code_evidence_files:
                 steps.append("il2cpp_merge")
 
-        shaders = _run_shader_recovery(assets_dir, project, warnings)
+        shaders = _run_shader_recovery(assets_dir, project, warnings, failed)
         if shaders:
             steps.append("shader_recovery")
 
@@ -413,11 +425,11 @@ def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
         if scenes_conv or prefabs_conv:
             steps.append("scene_convert")
 
-        wwise_count = _run_wwise_extract(extracted_dir, project, warnings)
+        wwise_count = _run_wwise_extract(extracted_dir, project, failed)
         if wwise_count:
             steps.append("wwise_extract")
 
-        meta_count = _run_meta_generation(project, warnings)
+        meta_count = _run_meta_generation(project)
         if meta_count:
             steps.append("meta_generation")
 
@@ -429,6 +441,7 @@ def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
             "unity_version": unity_version,
             "scripting_backend": backend,
             "steps": steps,
+            "failed_steps": failed,
             "assets": asset_counts,
             "scripts": scripts,
             "code_evidence_files": code_evidence_files,
@@ -460,6 +473,7 @@ def rebuild(workdir: Path, out_dir: Path, assets_dir: Path) -> RebuildResult:
         native_plugins=native_count,
         other_assets=asset_counts.get("other", 0),
         steps_run=tuple(steps),
+        steps_failed=tuple(f["step"] for f in failed),
         warnings=tuple(warnings),
     )
 
@@ -481,6 +495,8 @@ def summarize(result: RebuildResult) -> list[str]:
         f"other assets      : {result.other_assets}",
         f"steps run         : {', '.join(result.steps_run)}",
     ]
+    if result.steps_failed:
+        lines.append(f"steps failed      : {', '.join(result.steps_failed)} (errors in rebuild_report.json)")
     if result.warnings:
         lines.append(f"warnings          : {len(result.warnings)}")
         for w in result.warnings:

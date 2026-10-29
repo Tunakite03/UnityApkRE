@@ -266,6 +266,34 @@ class DecryptDirectoryTest(unittest.TestCase):
         self.assertIn("aes-128-cbc", text)
         self.assertIn("decrypted        : 1/1", text)
 
+    def test_plain_assemblies_are_copied_and_key_stays_out_of_console_and_report(self):
+        result = decrypt_directory(self.dll_dir, self.out, metadata=self.metadata)
+        self.assertEqual((self.out / "decrypted" / "Plain.dll").read_bytes(), _tiny_pe())
+        text = "\n".join(summarize(result))
+        report = (self.out / "report.json").read_text()
+        for secret in (self.key.hex(), self.iv.hex()):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, report)
+
+    def test_malformed_keys_file_is_a_clean_error(self):
+        keys = self.tmp / "keys.json"
+        for body in ("{", "[]", '{"algo": "aes-128-cbc"}', '{"algo": "aes-128-cbc", "key": "zz", "nonce": "00"}',
+                     '{"algo": "des", "key": "00"}'):
+            keys.write_text(body)
+            with self.assertRaises(UareError, msg=body):
+                decrypt_directory(self.dll_dir, self.out, keys_file=keys)
+            self.assertFalse(self.out.exists())
+
+    def test_cli_exits_1_when_an_assembly_stays_encrypted(self):
+        from uare.cli import main
+        (self.dll_dir / "Broken.dll").write_bytes(self.magic + b"\x00" * 64)
+        rc = main(["decrypt-hotdll", str(self.dll_dir), "--out", str(self.out), "--algo", "aes-128-cbc",
+                   "--key", self.key.hex(), "--iv", self.iv.hex(), "--magic", self.magic.hex()])
+        self.assertEqual(rc, 1)
+        report = json.loads((self.out / "report.json").read_text())
+        self.assertEqual({f["name"]: f["status"] == "decrypted" for f in report["files"]},
+                         {"Broken.dll": False, "Hotfix.dll": True})
+
     def test_no_metadata_found(self):
         (self.metadata).unlink()
         with self.assertRaises(UareError):

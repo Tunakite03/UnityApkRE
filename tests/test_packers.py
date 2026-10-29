@@ -3,6 +3,7 @@ import os
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,16 @@ class UnpackNativeCliTests(unittest.TestCase):
         code = f"import sys,shutil;shutil.copyfile({str(packed)!r}, sys.argv[1])"
         command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} {{output}}"
         self.assertEqual(main(["unpack-native", str(so), "--out", str(self.tmp / "out"), "--cmd", command]), 1)
+
+    def test_unpacker_that_hangs_is_killed_at_the_timeout_and_leaves_no_output(self) -> None:
+        so = self.tmp / "libil2cpp.so"
+        so.write_bytes(_packed(b"libjiagu"))
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(30)')} {{output}}"
+        started = time.monotonic()
+        rc = main(["unpack-native", str(so), "--out", str(self.tmp / "out"), "--cmd", command, "--cmd-timeout", "0.5"])
+        self.assertEqual(rc, 2)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertFalse((self.tmp / "out").exists())
 
     def test_identify_file_reads_from_disk(self) -> None:
         so = self.tmp / "libil2cpp.so"

@@ -545,6 +545,32 @@ def _solution_from_args(algo: str | None, key: bytes | None, iv: bytes | None,
     return Solution(algo, key, iv, magic or b"", "user-supplied key")
 
 
+def _solution_from_keys_file(path: Path) -> Solution:
+    """Read a keys.json written by an earlier run (or by hand); every field is validated."""
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HotDllError(f"--keys {path} is not a readable JSON file ({type(exc).__name__})") from exc
+    if not isinstance(spec, dict):
+        raise HotDllError(f"--keys {path} must hold a JSON object")
+    try:
+        algo, key_hex = spec["algo"], spec["key"]
+        nonce_hex, magic_hex = spec.get("nonce"), spec.get("magic") or ""
+        if not all(isinstance(v, str) for v in (algo, key_hex, magic_hex)) or \
+                not isinstance(nonce_hex, (str, type(None))):
+            raise TypeError("algo, key, nonce and magic must be strings")
+        key, magic = bytes.fromhex(key_hex), bytes.fromhex(magic_hex)
+        nonce = bytes.fromhex(nonce_hex) if nonce_hex else None
+    except KeyError as exc:
+        raise HotDllError(f"--keys {path} is missing the {exc.args[0]!r} field") from exc
+    except (TypeError, ValueError) as exc:
+        raise HotDllError(f"--keys {path} has an invalid field: {exc}") from exc
+    solution = _solution_from_args(algo, key, nonce, magic)
+    origin = spec.get("origin")
+    return Solution(solution.scheme, solution.key, solution.nonce, solution.magic,
+                    origin if isinstance(origin, str) else "keys file")
+
+
 def _locate_metadata(dll_dir: Path) -> Path:
     """Walk up from the dll directory looking for an extracted tree's metadata."""
     for parent in (dll_dir, *dll_dir.parents):
@@ -576,11 +602,7 @@ def decrypt_directory(dll_dir: Path, out_dir: Path, *, metadata: Path | None = N
 
     backend = _crypto()
     if keys_file is not None:
-        spec = json.loads(keys_file.read_text(encoding="utf-8"))
-        solution = Solution(spec["algo"], bytes.fromhex(spec["key"]),
-                            bytes.fromhex(spec["nonce"]) if spec.get("nonce") else None,
-                            bytes.fromhex(spec.get("magic", "")) or b"",
-                            spec.get("origin", "keys file"))
+        solution = _solution_from_keys_file(keys_file)
     elif key is not None:
         solution = _solution_from_args(algo, key, iv, magic)
     else:
@@ -593,6 +615,8 @@ def decrypt_directory(dll_dir: Path, out_dir: Path, *, metadata: Path | None = N
         for name in sorted(blobs):
             blob = blobs[name]
             if name not in encrypted:
+                # Keep decrypted/ a complete assembly set: plain DLLs are referenced by the hot-update ones.
+                (staging / "decrypted" / name).write_bytes(blob)
                 result.skipped.append(name)
                 continue
             if solution.magic and blob[:len(solution.magic)] != solution.magic:
@@ -620,10 +644,10 @@ def decrypt_directory(dll_dir: Path, out_dir: Path, *, metadata: Path | None = N
             "magic": solution.magic.hex(),
             "origin": solution.origin,
         }, indent=2), encoding="utf-8")
+        # Key material lives only in keys.json; the report and console point at it.
         (staging / "report.json").write_text(json.dumps({
             "root": result.root,
-            "solution": {"algo": solution.scheme, "key": solution.key.hex(),
-                         "nonce": solution.nonce.hex() if solution.nonce else None,
+            "solution": {"algo": solution.scheme, "keys_file": "keys.json",
                          "magic": solution.magic.hex(), "origin": solution.origin},
             "files": result.files, "skipped": result.skipped,
         }, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -636,9 +660,7 @@ def summarize(result: DecryptResult) -> list[str]:
     lines = [f"directory        : {result.root}"]
     if result.solution:
         lines.append(f"scheme           : {result.solution.scheme}")
-        lines.append(f"key              : {result.solution.key.hex()}")
-        if result.solution.nonce:
-            lines.append(f"iv/nonce         : {result.solution.nonce.hex()}")
+        lines.append("key, iv/nonce    : keys.json (not printed)")
         lines.append(f"magic prefix     : {result.solution.magic.hex() or '-'}")
         lines.append(f"key origin       : {result.solution.origin}")
     decrypted = sum(1 for f in result.files if f["status"] == "decrypted")

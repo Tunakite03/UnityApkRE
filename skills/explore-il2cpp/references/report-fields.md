@@ -45,6 +45,7 @@ With `--backend unitypy` (needs the `power` extra in `<plugin-root>/.venv-power`
 |---|---|
 | `functions.tsv` | `address<TAB>name<TAB>size` per function (address matches `methods_rva.tsv` RVAs) |
 | `decompiled/*.c` | pseudo-C per function (with `--no-decompile`, the directory is empty) |
+| `decompile-failures.tsv` | `address<TAB>name<TAB>reason` per function Ghidra could not decompile; the export continues |
 
 # report.json fields (uare analyze)
 

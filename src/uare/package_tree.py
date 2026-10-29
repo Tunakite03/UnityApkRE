@@ -61,6 +61,7 @@ _YOOASSET_PREFIXES = (
 )
 _TREE_OUTPUT_PREFIX = ".trees/"
 _MAX_STEM = 120
+_NAME_ATTEMPTS = 64
 _MAX_DEPTH = 64
 _SPINE_TEXT_SUFFIXES = (".atlas", ".skel", ".skel.bytes")
 _SPINE_SCRIPT_MARKERS = ("Skeleton", "Spine")
@@ -227,8 +228,10 @@ def _script_name(obj: Any) -> str:
 
 
 def _write(target: Path, payload: bytes) -> Path:
+    """Create `target`; an existing file is never overwritten (FileExistsError instead)."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(payload)
+    with target.open("xb") as handle:
+        handle.write(payload)
     return target
 
 
@@ -278,12 +281,14 @@ def _export_fev_bank(payload: bytes, directory: Path, stem: str) -> tuple[Path, 
         return bank, "FMOD bank without FSB5 sample data (event metadata only)"
     fmod_toolkit = importlib.import_module("fmod_toolkit")
     sample_stem = Path(bank_name).stem
+    sample_names: set[str] = set()
     decoded = 0
     for index, blob in enumerate(blobs):
         subsounds = fmod_toolkit.raw_to_wav(blob, f"{sample_stem}-{index}", 2, 44100)
         for sub_name, wav in subsounds.items():
             prefix = f"{index:02d}_" if len(blobs) > 1 else ""
-            _write(directory / sample_stem / f"{prefix}{_sanitize(Path(sub_name).stem)}.wav", bytes(wav))
+            name = _unique(f"{prefix}{_sanitize(Path(sub_name).stem)}.wav", 0, sample_names)
+            _write(directory / sample_stem / name, bytes(wav))
             decoded += 1
     if not decoded:
         return bank, "FSB5 present but no subsounds decoded"
@@ -312,18 +317,22 @@ def _export_object(obj: Any, cls: str, directory: Path, stem: str) -> tuple[Path
             return None, "no decodable image"
         target = directory / f"{stem}.png"
         target.parent.mkdir(parents=True, exist_ok=True)
-        image.save(target)
+        with target.open("xb") as handle:
+            image.save(handle, format="PNG")
         return target, None
     if cls == "AudioClip":
         samples = [(name, payload) for name, payload in (data.samples or {}).items() if payload]
         if not samples:
             return None, "no decodable samples"
-        first: Path | None = None
-        for index, (sample_name, payload) in enumerate(samples):
-            suffix = Path(sample_name).suffix or ".wav"
-            target = _write(directory / f"{stem}{'' if index == 0 else f'_{index}'}{suffix}", bytes(payload))
-            first = first or target
-        return first, None
+        targets = [directory / f"{stem}{'' if index == 0 else f'_{index}'}{Path(sample_name).suffix or '.wav'}"
+                   for index, (sample_name, _) in enumerate(samples)]
+        # Check every sample name first so a name clash never leaves a partial clip behind.
+        taken = next((target for target in targets if target.exists()), None)
+        if taken is not None:
+            raise FileExistsError(f"output exists: {taken}")
+        for target, (_, payload) in zip(targets, samples):
+            _write(target, bytes(payload))
+        return targets[0], None
     if cls == "Font":
         payload = _as_bytes(getattr(data, "m_FontData", b""))
         if not payload:
@@ -477,6 +486,14 @@ def _atlas_pages(text: str) -> list[str]:
         if len(lines) >= 2 and lines[1].startswith("size:"):
             pages.append(lines[0])
     return pages
+
+
+def _page_link_name(page: str, shared: str) -> str:
+    """Atlas page names are untrusted text. Spine loads pages by the atlas name, so keep it when it is a
+    single plain file name; anything that could leave the Spine folder uses the matched export's name."""
+    if page.strip() not in ("", ".", "..") and not any(ch in page for ch in "/\\:\0"):
+        return page
+    return Path(shared).name
 
 
 def _link(source: Path, target: Path) -> None:
@@ -692,11 +709,12 @@ class _Packager:
                 key = (_sanitize(Path(page).stem) + Path(page).suffix).lower()
                 candidates = sorted(images.get((full_group, key), []))
                 status = "linked" if len(candidates) == 1 else ("unresolved" if not candidates else "ambiguous")
-                page_rows.append({"name": page, "status": status, "shared": candidates[0] if status == "linked" else None,
-                                  "candidates": candidates})
+                shared = candidates[0] if status == "linked" else None
+                page_rows.append({"name": page, "status": status, "shared": shared, "candidates": candidates,
+                                  "link": _page_link_name(page, shared) if shared else None})
             links: dict[str, str] = {}
             for link_name, output in [(Path(o).name, o) for o in [dump, skeleton, *atlas_outputs] if o] + \
-                    [(row["name"], row["shared"]) for row in page_rows if row["shared"]]:
+                    [(row["link"], row["shared"]) for row in page_rows if row["shared"]]:
                 if links.setdefault(link_name, output) != output:
                     raise PackageLayoutError(f"spine folder {folder} has two files named {link_name}")
             for link_name, output in sorted(links.items()):
@@ -802,12 +820,7 @@ class _Packager:
                     directory = self._staging / "evidence" / "bundles" / group
                 else:
                     directory = self._staging / "shared" / category / _trim_group(group, category)
-                stem = _unique(_sanitize(_object_name(obj) or f"{cls}_{obj.path_id}"), obj.path_id,
-                               self._used[str(directory)])
-                if cls == "TextAsset" and category == "audio":
-                    target, note = _export_fev_bank(_as_bytes(getattr(obj.read(), "m_Script")), directory, stem)
-                else:
-                    target, note = _export_object(obj, cls, directory, stem)
+                target, note = self._export_named(obj, cls, category, directory)
             except _FAILURES as exc:
                 self._record(rel, obj, "unclassified", None, f"{type(exc).__name__}: {exc}")
                 continue
@@ -893,6 +906,22 @@ class _Packager:
         self._trees[rel, serialized] = target
         return _TREE_OUTPUT_PREFIX + target.name
 
+    def _export_named(self, obj: Any, cls: str, category: str, directory: Path) -> tuple[Path | None, str | None]:
+        """Export under a unique stem. A stem whose final file name (extension or extra sample) is already
+        taken by another object's output is skipped for the next counter; nothing is overwritten."""
+        base = _sanitize(_object_name(obj) or f"{cls}_{obj.path_id}")
+        used = self._used[str(directory)]
+        for attempt in range(_NAME_ATTEMPTS):
+            stem = _unique(base, obj.path_id, used)
+            try:
+                if cls == "TextAsset" and category == "audio":
+                    return _export_fev_bank(_as_bytes(getattr(obj.read(), "m_Script")), directory, stem)
+                return _export_object(obj, cls, directory, stem)
+            except FileExistsError:
+                if attempt + 1 == _NAME_ATTEMPTS:
+                    raise
+        raise AssertionError("unreachable")
+
     def _record_pending(self, rel: str, obj: Any, group: str, homed: set[int],
                         hierarchy_output: str | None, failures: dict[int, str]) -> None:
         cls = _class_name(obj)
@@ -925,9 +954,11 @@ th{background:#f4f4f4;position:sticky;top:0}img{max-height:48px}.sk{color:#a00}<
 <table><thead><tr><th>class</th><th>name</th><th>category</th><th>preview</th><th>source</th><th>output / note</th></tr></thead>
 <tbody id=b></tbody></table>
 <script>
+// Catalog values come from the game's files: escape every one before it reaches innerHTML.
+const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 fetch('catalog.json').then(r=>r.json()).then(rows=>{const q=document.getElementById('q'),b=document.getElementById('b'),n=document.getElementById('n');
 function render(){const p=rows;let re=null;try{re=q.value?new RegExp(q.value,'i'):null}catch(e){}const f=re?p.filter(x=>re.test(x.name+' '+x.class_name+' '+x.source+' '+x.category)):p;
-n.textContent=' '+f.length+' / '+p.length;b.innerHTML=f.slice(0,2000).map(x=>{const prev=x.output&&/\\.(png)$/.test(x.output)?`<img src='${x.output}'>`:'';const out=x.output?`<a href='${x.output}'>${x.output}</a>`:'';return `<tr><td>${x.class_name}</td><td>${x.name||''}</td><td>${x.category}</td><td>${prev}</td><td>${x.source}</td><td>${out} <span class=sk>${x.note||''}</span></td></tr>`}).join('')}
+n.textContent=' '+f.length+' / '+p.length;b.innerHTML=f.slice(0,2000).map(x=>{const o=e(x.output);const prev=x.output&&/\\.(png)$/.test(x.output)?`<img src='${o}'>`:'';const out=x.output?`<a href='${o}'>${o}</a>`:'';return `<tr><td>${e(x.class_name)}</td><td>${e(x.name)}</td><td>${e(x.category)}</td><td>${prev}</td><td>${e(x.source)}</td><td>${out} <span class=sk>${e(x.note)}</span></td></tr>`}).join('')}
 q.oninput=render;render();});
 </script>"""
 

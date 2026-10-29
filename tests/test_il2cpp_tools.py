@@ -94,6 +94,15 @@ class EnrichTests(unittest.TestCase):
         report = json.loads((out / "enrich_report.json").read_text())
         self.assertEqual(report["methods"], 2)
 
+    def test_dumper_that_exits_0_without_script_json_fails_and_leaves_no_output(self) -> None:
+        import sys
+        silent = _write_exec(self.tmp / "SilentDumper",
+                             f"#!{sys.executable}\nprint('ERROR: Metadata file supplied is not valid metadata file.')\n")
+        out = self.tmp / "out"
+        with self.assertRaisesRegex(UareError, "no script.json.*not valid metadata"):
+            enrich(self.tmp, out, ResolvedDumper(str(silent), "--dumper"))
+        self.assertFalse(out.exists())
+
     def test_enrich_without_metadata_fails_loud(self) -> None:
         empty = self.tmp / "empty"
         empty.mkdir()

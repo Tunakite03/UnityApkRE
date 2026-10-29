@@ -2,7 +2,8 @@
 
 `uare decompile <so>` runs Ghidra's `analyzeHeadless` on a native library (typically the unpacked
 `libil2cpp.so`) with a bundled post-script that exports the function list and, optionally, the
-C decompilation of every function. The addresses line up with the RVAs from `uare il2cpp-enrich`,
+C decompilation of every function. A function Ghidra cannot decompile within its per-function
+limit is recorded in decompile-failures.tsv and the export continues. The addresses line up with the RVAs from `uare il2cpp-enrich`,
 so a method name can be joined to its pseudo-C.
 
 Point at Ghidra with `--ghidra`, `UARE_GHIDRA`, a local copy under vendor/ghidra,
@@ -62,7 +63,9 @@ public class UareExport extends GhidraScript {
                 }
             }
             try (BufferedWriter listing = Files.newBufferedWriter(
-                    output.resolve("functions.tsv"), StandardCharsets.UTF_8)) {
+                    output.resolve("functions.tsv"), StandardCharsets.UTF_8);
+                 BufferedWriter failures = Files.newBufferedWriter(
+                    output.resolve("decompile-failures.tsv"), StandardCharsets.UTF_8)) {
                 FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
                 while (functions.hasNext()) {
                     monitor.checkCancelled();
@@ -74,8 +77,10 @@ public class UareExport extends GhidraScript {
                     if (exportCode) {
                         DecompileResults result = decompiler.decompileFunction(function, 30, monitor);
                         if (!result.decompileCompleted() || result.getDecompiledFunction() == null) {
-                            throw new IOException("Decompilation failed at " + address + ": " +
-                                    result.getErrorMessage());
+                            // One slow or broken function must not discard the whole export.
+                            String reason = String.valueOf(result.getErrorMessage()).replaceAll("\\s+", " ");
+                            failures.write(address + "\t" + name + "\t" + reason.trim() + "\n");
+                            continue;
                         }
                         String safeName = name.replaceAll("[^a-zA-Z0-9._-]", "_");
                         safeName = safeName.substring(0, Math.min(80, safeName.length()));
@@ -111,6 +116,7 @@ class GhidraResult:
     ghidra: str
     functions: int
     decompiled: int
+    failed: int
     out_dir: str
 
 
@@ -206,7 +212,12 @@ def decompile(so: Path, out_dir: Path, ghidra: str, *, decompile_functions: bool
             )
         functions = parse_functions(staging / "functions.tsv")
         decompiled = len(list((staging / "decompiled").glob("*.c"))) if (staging / "decompiled").is_dir() else 0
-    return GhidraResult(ghidra=ghidra, functions=len(functions), decompiled=decompiled, out_dir=str(out_dir))
+        failures = staging / "decompile-failures.tsv"
+        failed = len(failures.read_text(encoding="utf-8").splitlines()) if failures.is_file() else 0
+    if failed:
+        event(LOG, logging.WARNING, "ghidra_decompile_failures", failed=failed, decompiled=decompiled)
+    return GhidraResult(ghidra=ghidra, functions=len(functions), decompiled=decompiled, failed=failed,
+                        out_dir=str(out_dir))
 
 
 def summarize(result: GhidraResult) -> list[str]:
@@ -214,5 +225,6 @@ def summarize(result: GhidraResult) -> list[str]:
         f"ghidra            : {result.ghidra}",
         f"functions         : {result.functions} -> functions.tsv",
         f"decompiled        : {result.decompiled} -> decompiled/*.c",
+        f"not decompiled    : {result.failed} -> decompile-failures.tsv",
         f"output            : {result.out_dir}",
     ]

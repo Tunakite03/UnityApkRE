@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace Uare.SceneBuilder.Editor
 {
-    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 3).
+    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 4).
     [Serializable]
     internal sealed class SceneSpec
     {
@@ -15,6 +15,8 @@ namespace Uare.SceneBuilder.Editor
         public string scene;
         public string scopeId;
         public string originalPath;
+        // Original project path of the scene (Assets/...unity) when the build records one; empty otherwise.
+        public string scenePath;
         public string source;
         public string serializedFile;
         public string sourceRoot;
@@ -83,7 +85,8 @@ namespace Uare.SceneBuilder.Editor
     }
 
     // kind: file (copied), material (created from its properties) or scriptable (ScriptableObject created from its fields).
-    // path is the source under sourceRoot; importPath is where the asset goes under <assetsFolder>/Shared.
+    // path is the source under sourceRoot; importPath is where the asset goes under <assetsFolder>/Shared unless
+    // projectPath names its original project path (Assets/...). originalPath is the recorded path itself.
     [Serializable]
     internal sealed class AssetSpec
     {
@@ -124,6 +127,8 @@ namespace Uare.SceneBuilder.Editor
         // A sprite entry (kind sprite): its name inside the image at imagePath, an asset path of the same table.
         public string spriteName;
         public string imagePath;
+        public string projectPath;
+        public string originalPath;
     }
 
     [Serializable]
@@ -175,7 +180,7 @@ namespace Uare.SceneBuilder.Editor
     internal static class SceneSpecReader
     {
         private const string Schema = "uare.scene-spec";
-        private const int Version = 3;
+        private const int Version = 4;
 
         private static readonly HashSet<string> RowKinds = new HashSet<string> { "number", "string", "arraySize", "ref" };
         private static readonly HashSet<string> ReferenceKinds = new HashSet<string> { "object", "asset", "null", "missing", "unresolved" };
@@ -214,6 +219,11 @@ namespace Uare.SceneBuilder.Editor
                 throw new SceneBuildException($"Scene spec has an unsafe scene name; path={specPath}");
             }
 
+            if (!string.IsNullOrEmpty(spec.scenePath) && !(IsProjectPath(spec.scenePath) && spec.scenePath.EndsWith(".unity", StringComparison.Ordinal)))
+            {
+                throw new SceneBuildException($"Scene spec has an unsafe scene path; scene={spec.scene}, scenePath={spec.scenePath}");
+            }
+
             if (string.IsNullOrEmpty(spec.sourceRoot) || !Directory.Exists(spec.sourceRoot))
             {
                 throw new SceneBuildException($"Scene spec source root does not exist; scene={spec.scene}, sourceRoot={spec.sourceRoot}");
@@ -227,11 +237,13 @@ namespace Uare.SceneBuilder.Editor
 
             var assetPaths = new HashSet<string>(StringComparer.Ordinal);
             var importPaths = new HashSet<string>(StringComparer.Ordinal);
+            var projectPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var asset in spec.assets)
             {
                 ValidateAsset(spec.scene, asset);
                 // A sprite entry names a sprite inside its image, so it shares the image's import path.
-                if (!assetPaths.Add(asset.path) || (asset.kind != SceneAssetImporter.SpriteKind && !importPaths.Add(asset.importPath)))
+                if (!assetPaths.Add(asset.path) || (asset.kind != SceneAssetImporter.SpriteKind &&
+                    (!importPaths.Add(asset.importPath) || (!string.IsNullOrEmpty(asset.projectPath) && !projectPaths.Add(asset.projectPath)))))
                 {
                     throw new SceneBuildException($"Scene spec lists an asset path twice; scene={spec.scene}, path={asset.path}, importPath={asset.importPath}");
                 }
@@ -241,7 +253,8 @@ namespace Uare.SceneBuilder.Editor
             foreach (var sprite in spec.assets.Where(a => a.kind == SceneAssetImporter.SpriteKind))
             {
                 if (!byPath.TryGetValue(sprite.imagePath ?? string.Empty, out var image) || image.kind != SceneAssetImporter.FileKind ||
-                    image.importPath != sprite.importPath || sprite.path != sprite.imagePath + "#" + sprite.spriteName ||
+                    image.importPath != sprite.importPath || (image.projectPath ?? string.Empty) != (sprite.projectPath ?? string.Empty) ||
+                    sprite.path != sprite.imagePath + "#" + sprite.spriteName ||
                     image.sprites == null || image.sprites.Count(s => s.name == sprite.spriteName) != 1)
                 {
                     throw new SceneBuildException($"Scene spec sprite does not name exactly one sprite of an image in the table; scene={spec.scene}, sprite={sprite.path}");
@@ -308,6 +321,9 @@ namespace Uare.SceneBuilder.Editor
             }
         }
 
+        private static bool IsProjectPath(string path) =>
+            path.StartsWith("Assets/", StringComparison.Ordinal) && !path.Contains("..") && !path.Contains("\\") && !path.Contains("//");
+
         private static void ValidateAsset(string scene, AssetSpec asset)
         {
             foreach (var path in new[] { asset.path, asset.importPath })
@@ -316,6 +332,13 @@ namespace Uare.SceneBuilder.Editor
                 {
                     throw new SceneBuildException($"Scene spec has an unsafe asset path; scene={scene}, path={path}");
                 }
+            }
+
+            // An original project path keeps the import file's extension, so the asset imports as the same class.
+            if (!string.IsNullOrEmpty(asset.projectPath) && (!IsProjectPath(asset.projectPath) ||
+                !string.Equals(Path.GetExtension(asset.projectPath), Path.GetExtension(asset.importPath), StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new SceneBuildException($"Scene spec has an unsafe or mismatched project path; scene={scene}, projectPath={asset.projectPath}, importPath={asset.importPath}");
             }
 
             if (!AssetKinds.Contains(asset.kind ?? string.Empty))

@@ -254,6 +254,42 @@ class SceneSpecTests(unittest.TestCase):
         with self.assertRaises(SceneSpecError):
             self.build(objects)
 
+    def test_assets_get_original_project_paths_from_container_keys_and_catalog(self) -> None:
+        from test_addressables import GUID_A, _key, catalog
+        bundle = obj(BUNDLE, "CAB", 1, "AssetBundle", {"m_Container": [
+            [GUID_A, {"asset": ptr(0, 30)}], ["Assets/Art/atlas.psd", {"asset": ptr(0, 21)}]]})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog_path = root / "catalog.json"
+            catalog_path.write_text(json.dumps(catalog([_key("Assets/Art/Hero.mat")], [[0]], [0], [GUID_A])))
+            result = build_specs(package(root, model(scene_objects() + shared_objects() + [bundle])), root / "specs",
+                                 catalog_path)
+            spec = json.loads((root / "specs" / "Main.json").read_text(encoding="utf-8"))
+        assets = {a["path"]: a for a in spec["assets"]}
+        material = assets["shared/materials/scenes/HeroMat.json"]
+        self.assertEqual((material["projectPath"], material["originalPath"]), ("Assets/Art/Hero.mat", "Assets/Art/Hero.mat"))
+        texture = assets["shared/textures/scenes/atlas.png"]
+        # The recorded path keeps its folder and name; the extension follows the exported file.
+        self.assertEqual((texture["projectPath"], texture["originalPath"]), ("Assets/Art/atlas.png", "Assets/Art/atlas.psd"))
+        self.assertEqual(assets["shared/sprites/scenes/hero.png"]["projectPath"], "")
+        self.assertEqual(spec["version"], 4)
+        self.assertEqual(spec["scenePath"], "Assets/Scenes/Main.unity")
+        self.assertEqual((result.placed_at_original, result.original_conflicts), (2, 0))
+
+    def test_player_level_takes_its_build_settings_path(self) -> None:
+        settings = obj("Data/globalgamemanagers", "globalgamemanagers", 60, "BuildSettings",
+                       {"scenes": ["Assets/Scene/GameLauncher.unity"]})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets = package(root, model(scene_objects() + shared_objects() + [settings]))
+            header = assets / "scenes" / "Main" / "scene.json"
+            header.write_text(json.dumps({"scope_id": "x-scene", "kind": "scene", "name": "level0",
+                                          "source": SCENE, "serialized_file": "level0", "roots": []}))
+            build_specs(assets, root / "specs")
+            spec = json.loads((root / "specs" / "Main.json").read_text(encoding="utf-8"))
+        self.assertEqual((spec["originalPath"], spec["scenePath"]),
+                         ("Assets/Scene/GameLauncher.unity", "Assets/Scene/GameLauncher.unity"))
+
     def test_package_without_tag_manager_is_rejected(self) -> None:
         objects = [o for o in scene_objects() + shared_objects() if o.class_name != "TagManager"]
         with self.assertRaises(SceneSpecError):

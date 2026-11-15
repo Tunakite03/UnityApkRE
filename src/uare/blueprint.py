@@ -178,6 +178,32 @@ def _root_game_objects(ids: set[str], by_id: dict[str, ObjectRecord],
     return [oid for oid in roots if oid in ids]
 
 
+def build_scene_paths(model: GameModel) -> list[str]:
+    """Scene paths of the player's BuildSettings, in build-index order (levelN is entry N).
+
+    Unity stores the list as `m_Scenes` in older type trees and as `scenes` in newer ones (2022.3).
+    An empty list means no single BuildSettings object with a list of path strings exists.
+    """
+    lists = [value for o in model.objects if o.class_name == "BuildSettings"
+             for value in (o.data.get("m_Scenes", o.data.get("scenes")),) if isinstance(value, list)]
+    if len(lists) != 1 or not all(isinstance(item, str) for item in lists[0]):
+        return []
+    return list(lists[0])
+
+
+def original_asset_paths(model: GameModel, edges: dict[str, tuple[Reference, ...]],
+                         asset_paths: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Object id -> original project path, from AssetBundle containers: a key that is itself an `Assets/` path,
+    or an asset GUID the Addressables catalog names. Objects claimed by several different paths are left out."""
+    claims: dict[str, set[str]] = defaultdict(set)
+    for oid, keys in _bundle_assets(model, edges).items():
+        for key in keys:
+            path = key if key.startswith("Assets/") else (asset_paths or {}).get(key)
+            if path:
+                claims[oid].add(path)
+    return {oid: next(iter(paths)) for oid, paths in claims.items() if len(paths) == 1}
+
+
 def _catalog_aliases(aliases: dict[str, list[str]], asset_paths: Mapping[str, str]) -> dict[str, list[str]]:
     """Container keys that are asset GUIDs, replaced by the path an Addressables catalog records."""
     return {oid: [asset_paths[key] for key in keys if key in asset_paths]
@@ -210,9 +236,7 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
             elif (asset_paths and isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and
                     isinstance(pair[1], str) and asset_paths.get(pair[0], "").endswith(".unity")):
                 catalog_scenes[obj.source, pair[1]].add(asset_paths[pair[0]])
-    build_orders = [o for o in model.objects if o.class_name == "BuildSettings" and
-                    isinstance(o.data.get("m_Scenes"), list)]
-    build_order = build_orders[0].data["m_Scenes"] if len(build_orders) == 1 else []
+    build_order = build_scene_paths(model)
     specs: list[ScopeSpec] = []
     by_file: dict[tuple[str, str], set[str]] = defaultdict(set)
     for obj in model.objects:
@@ -231,10 +255,8 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
             evidence = ("AssetBundle.m_SceneHashes" if hashed_scenes else
                         "asset_container" if own_scenes else
                         CATALOG_SCENE_EVIDENCE if catalog_named else "serialized_filename")
-            if index is not None and isinstance(build_order, list) and index < len(build_order):
-                item = build_order[index]
-                if isinstance(item, str):
-                    name, evidence = item, "BuildSettings.m_Scenes + serialized_filename"
+            if index is not None and index < len(build_order):
+                name, evidence = build_order[index], "BuildSettings.m_Scenes + serialized_filename"
             specs.append(ScopeSpec("scene", name, file.source, file.serialized_file, frozenset(ids), None,
                                    index, evidence))
         elif any(by_id[oid].class_name == "GameObject" for oid in ids):

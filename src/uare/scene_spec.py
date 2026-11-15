@@ -17,6 +17,12 @@ The asset table has four kinds of entries, each with the path it gets inside the
 * ``scriptable``: a ScriptableObject (a MonoBehaviour asset such as a TMP font asset or a Spine
   SkeletonDataAsset) created from its type-tree fields when its script exists in the project.
 
+Placement: every entry carries ``projectPath``, the original project path when the build records one (an
+AssetBundle container key that is an ``Assets/`` path, or an asset GUID named by an Addressables catalog), with
+the exported file's extension; ``originalPath`` keeps the recorded path itself. An empty ``projectPath`` means no
+original path is known and the builder places the asset under its own folder. A scene carries ``scenePath`` the
+same way (an Addressables scene path, or the BuildSettings path of ``levelN``).
+
 The Unity-side builder (``unity/com.uare.scenebuilder``) reads a spec inside the Editor and builds the
 scene with Unity's own API, so importers, materials and serialization belong to Unity, not to this module.
 """
@@ -25,10 +31,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from uare.addressables import asset_paths as catalog_asset_paths
+from uare.blueprint import build_scene_paths, original_asset_paths
 from uare.errors import UareError
 from uare.game_model import GameModel, Json, ObjectRecord, Reference, load_model, non_finite, outgoing
 from uare.logs import event
@@ -37,7 +46,7 @@ from uare.outdir import staged_output
 LOG = logging.getLogger("uare.scene_spec")
 
 SCHEMA = "uare.scene-spec"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Set structurally by the builder (hierarchy, ownership, script binding) or managed by Unity itself.
 _STRUCTURAL = frozenset({
@@ -60,6 +69,13 @@ _TEXT_EXTENSIONS = (".txt", ".bytes", ".json", ".csv", ".xml", ".yaml", ".html",
 _ALPHA8 = 1  # TextureFormat.Alpha8
 
 
+_LEVEL = re.compile(r"level(\d+)")
+
+
+def _is_scene_path(path: str) -> bool:
+    return path.startswith("Assets/") and path.endswith(".unity") and ".." not in path and "\\" not in path
+
+
 class SceneSpecError(UareError):
     """A scene spec could not be built from the package output."""
 
@@ -72,6 +88,11 @@ class SceneSpecResult:
     assets: int
     unresolved_references: int
     out_dir: str
+    # Assets placed at their original project path / left to the builder's folder because none is recorded /
+    # left there because another asset already claimed the same original path.
+    placed_at_original: int = 0
+    without_original: int = 0
+    original_conflicts: int = 0
 
 
 def _row(path: str, kind: str, number: float = 0.0, text: str = "", ref_kind: str = "",
@@ -109,16 +130,24 @@ def _asset_entry(path: str, import_path: str, kind: str, target: ObjectRecord) -
         "shaderName": "", "renderQueue": -1, "keywords": [], "textures": [], "floats": [], "ints": [], "colors": [],
         "scriptClass": "", "scriptNamespace": "", "scriptAssembly": "", "props": [], "droppedProperties": [],
         "spriteMode": "none", "sprites": [], "spriteName": "", "imagePath": "",
+        "projectPath": "", "originalPath": "",
     }
 
 
 class _SpecBuilder:
     """Resolves one model's references; holds the asset table of the scene being written."""
 
-    def __init__(self, model: GameModel, source_root: Path) -> None:
+    def __init__(self, model: GameModel, source_root: Path, asset_paths: dict[str, str] | None = None) -> None:
         self._by_id = {o.id: o for o in model.objects}
         self._edges = outgoing(model)
         self._source_root = source_root
+        self._original = original_asset_paths(model, self._edges, asset_paths)
+        self._build_scenes = build_scene_paths(model)
+        # Project path (case-folded, as the file system compares them) -> the object placed there, across scenes.
+        self._placed: dict[str, str] = {}
+        self.placed_at_original: set[str] = set()
+        self.without_original: set[str] = set()
+        self.original_conflicts: set[str] = set()
         self._assets: dict[str, dict[str, Json]] = {}
         self._linkable: set[str] = set()
         self.unresolved = 0
@@ -200,7 +229,34 @@ class _SpecBuilder:
             entry["props"] = rows
         else:
             return None
+        self._place(target, self._assets[output])
         return output
+
+    def _scene_original(self, recorded: str, serialized_file: str) -> str:
+        """The scene's original path: the recorded scope name, or the BuildSettings entry of a `levelN` file."""
+        if _is_scene_path(recorded):
+            return recorded
+        match = _LEVEL.fullmatch(serialized_file)
+        if match and int(match[1]) < len(self._build_scenes):
+            return self._build_scenes[int(match[1])]
+        return recorded
+
+    def _place(self, target: ObjectRecord, entry: dict[str, Json]) -> None:
+        """Set `projectPath`: the original path with the import file's extension, unless none is recorded or another
+        object already holds that path (the builder then uses its own folder; both cases are counted)."""
+        original = self._original.get(target.id, "")
+        entry["originalPath"] = original
+        if not original:
+            self.without_original.add(target.id)
+            return
+        suffix = PurePosixPath(str(entry["importPath"])).suffix
+        candidate = str(PurePosixPath(original).with_suffix(suffix))
+        holder = self._placed.setdefault(candidate.casefold(), target.id)
+        if holder != target.id:
+            self.original_conflicts.add(target.id)
+            return
+        entry["projectPath"] = candidate
+        self.placed_at_original.add(target.id)
 
     def _sheet_sprite(self, sprite: ObjectRecord) -> str | None:
         """Register `sprite` as a sub-asset of its exported texture; None when the texture was not exported."""
@@ -216,6 +272,8 @@ class _SpecBuilder:
             entry = _asset_entry(key, self._assets[image]["importPath"], "sprite", sprite)
             entry["spriteName"] = self._sprite_names[sprite.id]
             entry["imagePath"] = image
+            entry["projectPath"] = self._assets[image]["projectPath"]
+            entry["originalPath"] = self._assets[image]["originalPath"]
             self._assets[key] = entry
         return key
 
@@ -455,9 +513,11 @@ class _SpecBuilder:
             props: list[dict[str, Json]] = []
             self._flatten(obj.data, "", "", self._refs(obj.id), props)
             settings.append({"id": obj.id, "className": obj.class_name, "props": props})
+        original = self._scene_original(str(header.get("name", "")), str(header["serialized_file"]))
         return {
             "schema": SCHEMA, "version": SCHEMA_VERSION, "scene": name, "scopeId": str(header["scope_id"]),
-            "originalPath": str(header.get("name", "")), "source": str(header["source"]),
+            "originalPath": original, "scenePath": original if _is_scene_path(original) else "",
+            "source": str(header["source"]),
             "serializedFile": str(header["serialized_file"]), "sourceRoot": str(self._source_root),
             "rootOrderBasis": "path_id",
             "tags": project["tags"], "layers": project["layers"], "sortingLayers": project["sortingLayers"],
@@ -479,14 +539,18 @@ def _project_settings(model: GameModel) -> dict[str, Json]:
     return {"tags": tags, "layers": layers, "sortingLayers": sorting}
 
 
-def build_specs(assets_dir: Path, out_dir: Path) -> SceneSpecResult:
-    """Write one spec per scene folder of a package output into `out_dir` (must be new or empty)."""
+def build_specs(assets_dir: Path, out_dir: Path, addressables_catalog: Path | None = None) -> SceneSpecResult:
+    """Write one spec per scene folder of a package output into `out_dir` (must be new or empty).
+
+    `addressables_catalog` supplies original paths for bundle assets whose container keys are asset GUIDs.
+    """
     model_path = assets_dir / "game_model.json"
     scenes_dir = assets_dir / "scenes"
     if not model_path.is_file() or not scenes_dir.is_dir():
         raise SceneSpecError(f"Scene specs need a package output with game_model.json and scenes/; source={assets_dir}")
+    catalog = catalog_asset_paths(addressables_catalog) if addressables_catalog else None
     model = load_model(model_path)
-    builder = _SpecBuilder(model, assets_dir.resolve())
+    builder = _SpecBuilder(model, assets_dir.resolve(), catalog.paths if catalog else None)
     project = _project_settings(model)
     by_file: dict[tuple[str, str], list[ObjectRecord]] = defaultdict(list)
     for obj in model.objects:
@@ -507,9 +571,13 @@ def build_specs(assets_dir: Path, out_dir: Path) -> SceneSpecResult:
             game_objects += len(spec["gameObjects"])
             components += sum(len(g["components"]) for g in spec["gameObjects"])
             assets += len(spec["assets"])
-    result = SceneSpecResult(tuple(names), game_objects, components, assets, builder.unresolved, str(out_dir))
+    result = SceneSpecResult(tuple(names), game_objects, components, assets, builder.unresolved, str(out_dir),
+                             len(builder.placed_at_original), len(builder.without_original),
+                             len(builder.original_conflicts))
     event(LOG, logging.INFO, "scene_specs_written", scenes=len(names), game_objects=game_objects,
-          components=components, assets=assets, unresolved=builder.unresolved)
+          components=components, assets=assets, unresolved=builder.unresolved,
+          placed_at_original=result.placed_at_original, without_original=result.without_original,
+          original_conflicts=result.original_conflicts)
     return result
 
 
@@ -520,4 +588,6 @@ def summarize(result: SceneSpecResult) -> list[str]:
         f"components        : {result.components}",
         f"assets            : {result.assets} asset entries (counted per scene)",
         f"unresolved refs   : {result.unresolved_references}",
+        f"original paths    : {result.placed_at_original} assets placed, {result.without_original} without a "
+        f"recorded path, {result.original_conflicts} path conflicts",
     ]

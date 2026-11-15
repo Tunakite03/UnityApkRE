@@ -160,6 +160,15 @@ class BlueprintTests(unittest.TestCase):
         self.assertEqual(report["kind"], "prefab")
         self.assertEqual(report["classification_evidence"], "AssetBundle.m_Container")
 
+    def test_build_settings_scenes_key_names_player_levels(self) -> None:
+        files = (FileRecord("Data/level0", "level0", ()), FileRecord("Data/globalgamemanagers", "globalgamemanagers", ()))
+        objects = (obj("Data/level0", "level0", 1, "GameObject", {"m_Name": "Launcher"}),
+                   obj("Data/globalgamemanagers", "globalgamemanagers", 2, "BuildSettings",
+                       {"scenes": ["Assets/Scene/GameLauncher.unity"]}))
+        scene = scene_reports(resolve(files, objects, ()))[0]
+        self.assertEqual((scene["name"], scene["classification_evidence"]),
+                         ("Assets/Scene/GameLauncher.unity", "BuildSettings.m_Scenes + serialized_filename"))
+
     def _guid_container_model(self, key: str) -> GameModel:
         objects = (obj("bundle", "CAB", 1, "GameObject", {"m_Name": "Player", "m_Component": [{"component": ptr(0, 2)}]}),
                    obj("bundle", "CAB", 2, "Transform", {"m_GameObject": ptr(0, 1), "m_Father": ptr(0, 0), "m_Children": []}),

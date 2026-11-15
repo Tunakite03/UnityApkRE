@@ -9,7 +9,7 @@ using Object = UnityEngine.Object;
 
 namespace Uare.SceneBuilder.Editor
 {
-    // Brings a scene's assets into <assetsFolder>/Shared/<importPath>:
+    // Brings a scene's assets to their original project path (projectPath) or, without one, into <assetsFolder>/Shared/<importPath>:
     //  - file: the exported file is copied; a newly copied image gets the original sprite and texture settings;
     //  - material: created with the original shader (or a sprite/UI substitute of the project's render pipeline) and exactly the saved properties and keywords;
     //  - scriptable: a ScriptableObject of the original script type, filled from the original fields after all
@@ -214,9 +214,10 @@ namespace Uare.SceneBuilder.Editor
             return withoutScript;
         }
 
+        // The asset's original project path when the spec records one; otherwise <assetsFolder>/Shared/<importPath>.
         internal static string ProjectPath(string assetsFolder, AssetSpec asset)
         {
-            return assetsFolder + "/Shared/" + asset.importPath.Substring("shared/".Length);
+            return string.IsNullOrEmpty(asset.projectPath) ? assetsFolder + "/Shared/" + asset.importPath.Substring("shared/".Length) : asset.projectPath;
         }
 
         private static string ScriptName(AssetSpec asset)

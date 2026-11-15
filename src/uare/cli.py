@@ -441,7 +441,8 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
 def cmd_scene_spec(args: argparse.Namespace) -> int:
     from uare.scene_spec import build_specs
     from uare.scene_spec import summarize as summarize_specs
-    result = build_specs(Path(args.workdir) / args.assets, Path(args.out))
+    catalog = Path(args.addressables_catalog) if args.addressables_catalog else None
+    result = build_specs(Path(args.workdir) / args.assets, Path(args.out), catalog)
     print("\n".join(summarize_specs(result)))
     return 0
 
@@ -739,6 +740,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workdir", help="directory from a prior `uare run` (with extracted-assets/, ...)")
     p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the scene specs")
+    p.add_argument("--addressables-catalog", help="Addressables catalog_*.json naming the original project paths "
+                   "of bundle assets stored under asset GUIDs")
     p.set_defaults(func=cmd_scene_spec)
 
     p = sub.add_parser("sprite-sheets", help="write every Sprite's rect, pivot, border and pixels per unit grouped by texture")

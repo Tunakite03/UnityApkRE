@@ -11,7 +11,8 @@ using Object = UnityEngine.Object;
 
 namespace Uare.SceneBuilder.Editor
 {
-    // Builds one scene from a uare scene spec and saves it as <assetsFolder>/Scenes/<scene>.unity.
+    // Builds one scene from a uare scene spec and saves it at its original path (spec scenePath) or, without one, as
+    // <assetsFolder>/Scenes/<scene>.unity. Assets go to their original project paths when the spec records them.
     //
     // Order: validate the spec and every file it needs (no writes) -> new empty scene -> project settings (tags, layers,
     // sorting layers) -> the scene's assets -> GameObjects and components -> serialized properties and references ->
@@ -40,7 +41,8 @@ namespace Uare.SceneBuilder.Editor
 
             var spec = SceneSpecReader.Read(specPath);
             var projectRoot = Path.GetDirectoryName(Application.dataPath);
-            var scenePath = $"{assetsFolder}/Scenes/{spec.scene}.unity";
+            // The original scene path when the build records one; otherwise <assetsFolder>/Scenes/<scene>.unity.
+            var scenePath = string.IsNullOrEmpty(spec.scenePath) ? $"{assetsFolder}/Scenes/{spec.scene}.unity" : spec.scenePath;
             if (File.Exists(Path.Combine(projectRoot, scenePath)))
             {
                 throw new SceneBuildException($"Scene already exists and is not replaced; delete it to rebuild; path={scenePath}");

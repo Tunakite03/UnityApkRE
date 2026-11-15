@@ -410,13 +410,15 @@ def cmd_assetripper_remap(args: argparse.Namespace) -> int:
 
 def cmd_blueprint(args: argparse.Namespace) -> int:
     from uare.blueprint import blueprint
-    result = blueprint(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets)
+    catalog = Path(args.addressables_catalog) if args.addressables_catalog else None
+    result = blueprint(Path(args.workdir), Path(args.out), Path(args.workdir) / args.assets, catalog)
     print(json.dumps(asdict(result), indent=2))
     return 0
 
 
 def cmd_package(args: argparse.Namespace) -> int:
-    result = package(Path(args.root), Path(args.out), [Path(p) for p in args.script_assemblies])
+    catalog = Path(args.addressables_catalog) if args.addressables_catalog else None
+    result = package(Path(args.root), Path(args.out), [Path(p) for p in args.script_assemblies], catalog)
     print("\n".join(summarize_package(result)))
     return 0
 
@@ -441,6 +443,22 @@ def cmd_scene_spec(args: argparse.Namespace) -> int:
     from uare.scene_spec import summarize as summarize_specs
     result = build_specs(Path(args.workdir) / args.assets, Path(args.out))
     print("\n".join(summarize_specs(result)))
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    from uare.prune import apply_prune, plan_prune, summarize as summarize_prune
+    plan = plan_prune(Path(args.workdir), tuple(args.keep))
+    removed = apply_prune(plan) if args.yes else None
+    print("\n".join(summarize_prune(plan, removed)))
+    return 0
+
+
+def cmd_sprite_sheets(args: argparse.Namespace) -> int:
+    from uare.sprite_sheets import write_manifest
+    from uare.sprite_sheets import summarize as summarize_sheets
+    result = write_manifest(Path(args.workdir) / args.assets, Path(args.out))
+    print("\n".join(summarize_sheets(result)))
     return 0
 
 
@@ -676,6 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("root", help="extracted tree or Unity Data directory")
     p.add_argument("--out", required=True, help="empty directory for shared/, scenes/, prefabs/, spines/, evidence/, scripts/, catalog.json ...")
     _add_script_assemblies(p)
+    p.add_argument("--addressables-catalog", help="Addressables catalog_*.json whose path keys name bundle "
+                   "contents stored under asset GUIDs (prefabs and streamed scenes)")
     p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("fetch-tool", help="download + unpack an external tool archive into vendor/")
@@ -705,6 +725,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workdir", help="work directory containing the package output folder")
     p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the report, browser and scope manifests")
+    p.add_argument("--addressables-catalog", help="Addressables catalog_*.json whose path keys name bundle "
+                   "contents stored under asset GUIDs (prefabs and streamed scenes)")
     p.set_defaults(func=cmd_blueprint)
 
     p = sub.add_parser("rebuild", help="create a structural Unity draft and report all unresolved reconstruction bindings")
@@ -718,6 +740,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the scene specs")
     p.set_defaults(func=cmd_scene_spec)
+
+    p = sub.add_parser("sprite-sheets", help="write every Sprite's rect, pivot, border and pixels per unit grouped by texture")
+    p.add_argument("workdir", help="directory from a prior `uare run` (with extracted-assets/, ...)")
+    p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
+    p.add_argument("--out", required=True, help="empty directory for sprite_sheets.json")
+    p.set_defaults(func=cmd_sprite_sheets)
+
+    p = sub.add_parser("prune", help="remove superseded intermediate outputs in a workspace (dry run unless --yes)")
+    p.add_argument("workdir", help="game workspace directory")
+    p.add_argument("--keep", action="append", required=True, metavar="NAME",
+                   help="verified output directory to keep (repeatable); required")
+    p.add_argument("--yes", action="store_true", help="delete the candidates; without it nothing is removed")
+    p.set_defaults(func=cmd_prune)
 
     p = sub.add_parser("mono-decompile", help="decompile Mono assemblies to C# via ILSpy")
     p.add_argument("managed", help="path to the Managed/ directory containing .dll files")

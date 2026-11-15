@@ -50,7 +50,9 @@ point and `report.json` / `scopes/*.json` are machine-readable.
 
 Existing category-only exports must be repackaged with this version: their path IDs
 cannot safely distinguish objects in different serialized files. Use a fresh
-output directory within the existing workspace; never overwrite earlier results.
+output directory within the existing workspace; never overwrite results in place.
+Once the new output is verified, `uare prune <workdir> --keep <new dir> --yes`
+removes the older copies of that stage.
 
 Agents should read [AGENTS.md](AGENTS.md) and the
 [workspace and local tool guide](docs/agent-tools.md). The guide explains capture

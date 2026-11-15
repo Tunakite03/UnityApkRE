@@ -17,7 +17,9 @@ before selecting inputs or installing tools; vendored tools and the `.venv-power
 environment live in the plugin root, workspaces live in the user's directory.
 Select the working capture using the user's request and verified package/version
 manifests. Use an existing workdir when one matches; each command's output must be
-new or empty. Record game-specific workspace choices with the capture.
+new or empty. Keep one current output per stage: once a re-run output is verified,
+`uare prune <workdir> --keep <new dir> --yes` removes that stage's older copies.
+Record game-specific workspace choices with the capture.
 
 There is no scope checkpoint. Do not stop to ask which rebuild mode, focus area or
 backend strategy the user wants: run the whole workflow below and report. Ask only
@@ -66,8 +68,8 @@ packages, a missing Unity project for step 9a).
      Use only `matched` rows of `mapping.json`; report ambiguous, unmatched and
      conflicting assets, which keep AssetRipper GUIDs.
    Without AssetRipper, record the gap and continue.
-5. **Read the blueprint.** Open `blueprint/index.html` or read `report.json` and the
-   relevant `scopes/*.json`. These are the main results;
+5. **Read the blueprint.** Read `blueprint/overview.md` and `report.json`, then the
+   relevant `scopes/<id>.js` one at a time. Do not read `index.html` or `game_model.json` whole. These are the main results;
    `extracted-assets/catalog.json` is supporting evidence.
 6. **Structure.** Investigate scene structure, serialized fields, scripts and
    animations together. Follow object IDs and references; never join by asset name

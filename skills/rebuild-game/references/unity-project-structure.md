@@ -22,7 +22,6 @@ Reconstruction/
   Blueprint/
     index.html
     report.json
-    game_model.json
     scopes/
   CodeEvidence/IL2CPP/
   bindings.json

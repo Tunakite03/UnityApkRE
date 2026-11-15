@@ -11,7 +11,7 @@ namespace Uare.SceneBuilder.Editor
 {
     // Brings a scene's assets into <assetsFolder>/Shared/<importPath>:
     //  - file: the exported file is copied; a newly copied image gets the original sprite and texture settings;
-    //  - material: created with the original shader (or a URP substitute) and exactly the saved properties and keywords;
+    //  - material: created with the original shader (or a sprite/UI substitute of the project's render pipeline) and exactly the saved properties and keywords;
     //  - scriptable: a ScriptableObject of the original script type, filled from the original fields after all
     //    assets exist, so assets may reference each other. Without its script type it is not created and
     //    references to it are reported as missing.
@@ -24,7 +24,8 @@ namespace Uare.SceneBuilder.Editor
         public const string MaterialKind = "material";
         public const string ScriptableKind = "scriptable";
         public const string SpriteKind = "sprite";
-        private const string SpriteRenderShader = "Universal Render Pipeline/2D/Sprite-Unlit-Default";
+        private const string UrpSpriteShader = "Universal Render Pipeline/2D/Sprite-Unlit-Default";
+        private const string BuiltInSpriteShader = "Sprites/Default";
         private const string UiShader = "UI/Default";
         private static Dictionary<string, List<Type>> _scriptableTypes;
 
@@ -459,7 +460,13 @@ namespace Uare.SceneBuilder.Editor
             return material;
         }
 
-        // The original shader when this project has it; otherwise a URP sprite or UI shader, recorded as a substitution.
+        // Sprite substitute of the project's active render pipeline: URP's unlit sprite shader under a scriptable
+        // pipeline, the built-in sprite shader otherwise.
+        private static string SpriteSubstitute() =>
+            UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline == null ? BuiltInSpriteShader : UrpSpriteShader;
+
+        // The original shader when this project has it; otherwise a sprite or UI shader of the project's render
+        // pipeline, recorded as a substitution.
         private static Shader ResolveShader(AssetSpec spec, string projectPath, SceneBuildReport report, out bool substituted)
         {
             var original = string.IsNullOrEmpty(spec.shaderName) ? null : Shader.Find(spec.shaderName);
@@ -471,7 +478,7 @@ namespace Uare.SceneBuilder.Editor
 
             var ui = spec.shaderName.StartsWith("UI/", StringComparison.Ordinal) || spec.shaderName.StartsWith("FairyGUI/", StringComparison.Ordinal) ||
                      spec.shaderName.StartsWith("TextMeshPro/", StringComparison.Ordinal);
-            var fallbackName = ui ? UiShader : SpriteRenderShader;
+            var fallbackName = ui ? UiShader : SpriteSubstitute();
             var fallback = Shader.Find(fallbackName);
             if (fallback == null)
             {

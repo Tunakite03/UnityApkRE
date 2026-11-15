@@ -231,6 +231,26 @@ def _member_names(data: bytes, heap: bytes, section: tuple[int, int], stride: in
     return names
 
 
+# Il2CppMethodDefinition.parameterCount (uint16) for metadata v31, from Il2CppDumper's
+# Il2CppMethodDefinition: token@24, flags@28, iflags@30, slot@32, parameterCount@34 (stride 36).
+# Checked on a real build: it equals the parameter count of all 79,387 linked method signatures.
+_V31_METHOD_PARAMETER_COUNT_OFFSET = 34
+
+
+def _emit_parameter_counts(data: bytes, section: tuple[int, int], layout: Layout, out_path: Path) -> int:
+    """Write `method_index<TAB>parameter_count` for every method row; only layouts verified here are written."""
+    if layout.name != "v31":
+        return 0
+    offset, size = section
+    count = size // layout.method_stride
+    with out_path.open("w", encoding="utf-8") as handle:
+        for index in range(count):
+            value = struct.unpack_from("<H", data, offset + index * layout.method_stride
+                                       + _V31_METHOD_PARAMETER_COUNT_OFFSET)[0]
+            handle.write(f"{index}\t{value}\n")
+    return count
+
+
 def _group_members(data: bytes, heap: bytes, pairs: list[tuple[int, int]], layout: Layout,
                    out_path: Path) -> GroupingResult:
     """Group methods/fields/events/properties under their declaring type using the ranges stored
@@ -343,6 +363,7 @@ def dump_definitions(metadata_path: Path, out_dir: Path) -> DumpResult:
               validity=round(validity, 3))
 
     grouping = _group_members(data, heap, pairs, layout, out_dir / "members.tsv")
+    _emit_parameter_counts(data, pairs[_METHODS_SECTION], layout, out_dir / "method_parameters.tsv")
     event(LOG, logging.INFO, "il2cpp_grouping", types=grouping.types_total, grouped=grouping.types_grouped,
           members=grouping.member_rows, skipped=grouping.ranges_skipped,
           valid_fraction=round(grouping.valid_fraction, 3))

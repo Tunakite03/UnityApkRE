@@ -237,6 +237,14 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(roots[0]["name"], "Root")
         self.assertEqual(roots[0]["children"][0]["name"], "Child")
 
+    def test_malformed_addressables_catalog_fails_before_output_is_written(self) -> None:
+        catalog = self.tmp / "catalog.json"
+        catalog.write_text(json.dumps({"m_InternalIds": [], "m_KeyDataString": "!!"}))
+        out = self.tmp / "out"
+        with self.assertRaises(pt.UareError):
+            pt.package(self.data, out, (), catalog)
+        self.assertFalse(out.exists())
+
     def test_fev_bank_is_copied_and_decoded(self) -> None:
         _result, out = self._package()
         bank = out / "shared/audio/sprite/pet/pet/1009/Arrow.bank"

@@ -18,9 +18,14 @@ Keep code, comments and architecture documents in English.
   and pull APK splits, OBB and accessible game content. Do not ask for an APK
   upload before checking the already authorized device workflow.
 - Keep one canonical workspace per acquired build. Reuse its existing inputs;
-  each producing command needs a new or empty output directory. On retry, create
-  a fresh stage output inside that workspace, not another competing game root.
-  A fresh `run` still needs a new workspace. Never overwrite earlier evidence.
+  each producing command writes a new or empty output directory (never in place).
+  On retry, create a fresh stage output inside that workspace, not another
+  competing game root. A fresh `run` still needs a new workspace.
+- One current output per stage. As soon as a new stage output is verified, run
+  `uare prune <workdir> --keep <new dir> --yes` before moving on; it removes only
+  the older outputs of that stage's family (see the guide). If the new output
+  fails verification, delete it instead and keep the old one. Captures and
+  decrypted/decompiled evidence are never pruned.
 - Preserve source hashes, acquisition manifests and relationships to raw capture
   folders. Do not delete/move historical captures without checking references.
   Tool verification output belongs under `re/tool-verification-*`.

@@ -194,3 +194,90 @@ class MergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnrichFormatJoinTests(unittest.TestCase):
+    """`uare il2cpp-enrich` rows (rva, class, method, signature) are joined on type and method name."""
+
+    def _tables(self, tmpdir: str, members: str, enrich_rows: str) -> tuple[Path, Path]:
+        il2cpp = Path(tmpdir) / "il2cpp"
+        il2cpp.mkdir()
+        (il2cpp / "types.tsv").write_text("0\tNS\tFoo\n1\tNS\tBar\n")
+        (il2cpp / "images.tsv").write_text("0\tAssembly-CSharp.dll\t0\t1\n")
+        (il2cpp / "members.tsv").write_text(members)
+        enrich = Path(tmpdir) / "enrich"
+        enrich.mkdir()
+        (enrich / "methods_rva.tsv").write_text(enrich_rows)
+        return il2cpp, enrich
+
+    def test_unique_name_links_rva(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            il2cpp, enrich = self._tables(
+                tmpdir,
+                "0\tFoo\tmethod\t10\tRun\n1\tBar\tmethod\t11\tRun\n",
+                "0x1000\tNS.Foo\tRun\tvoid Run()\n0x2000\tNS.Bar\tRun\tvoid Run(int)\n",
+            )
+            from uare.il2cpp_merge import _load_rvas, _load_types, _load_members
+            rvas = _load_rvas(enrich, _load_types(il2cpp), _load_members(il2cpp))
+            self.assertEqual(rvas, {10: 0x1000, 11: 0x2000})
+
+    def test_ambiguous_overloads_stay_unlinked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            il2cpp, enrich = self._tables(
+                tmpdir,
+                "0\tFoo\tmethod\t10\tRun\n0\tFoo\tmethod\t12\tRun\n",
+                "0x1000\tNS.Foo\tRun\tvoid Run()\n0x3000\tNS.Foo\tRun\tvoid Run(int)\n",
+            )
+            from uare.il2cpp_merge import _load_rvas, _load_types, _load_members
+            rvas = _load_rvas(enrich, _load_types(il2cpp), _load_members(il2cpp))
+            self.assertEqual(rvas, {})
+
+    def test_index_format_still_accepted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            il2cpp, enrich = self._tables(tmpdir, "", "7\t4096\n")
+            from uare.il2cpp_merge import _load_rvas, _load_types, _load_members
+            rvas = _load_rvas(enrich, _load_types(il2cpp), _load_members(il2cpp))
+            self.assertEqual(rvas, {7: 4096})
+
+
+class OverloadPairingTests(unittest.TestCase):
+    """Overloads sharing a type and name are linked by parameter count when that identifies them."""
+
+    def test_signature_parameter_count_ignores_this_and_method_info(self):
+        from uare.il2cpp_merge import _signature_parameter_count
+        self.assertEqual(_signature_parameter_count("void T_M (T_o* __this, int32_t a, const MethodInfo* method);"), 1)
+        self.assertEqual(_signature_parameter_count("void T_S (const MethodInfo* method);"), 0)
+        self.assertEqual(_signature_parameter_count("void T_S (int32_t a, int32_t b, const MethodInfo* method);"), 2)
+        self.assertIsNone(_signature_parameter_count("not a signature"))
+
+    def test_overloads_link_by_parameter_count(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            il2cpp = Path(tmpdir) / "il2cpp"
+            il2cpp.mkdir()
+            (il2cpp / "types.tsv").write_text("0\tNS\tFoo\n")
+            (il2cpp / "members.tsv").write_text("0\tFoo\tmethod\t10\tRun\n0\tFoo\tmethod\t11\tRun\n")
+            (il2cpp / "method_parameters.tsv").write_text("10\t0\n11\t1\n")
+            enrich = Path(tmpdir) / "enrich"
+            enrich.mkdir()
+            (enrich / "methods_rva.tsv").write_text(
+                "0x1000\tNS.Foo\tRun\tvoid NS_Foo_Run (NS_Foo_o* __this, const MethodInfo* method);\n"
+                "0x2000\tNS.Foo\tRun\tvoid NS_Foo_Run (NS_Foo_o* __this, int32_t a, const MethodInfo* method);\n")
+            from uare.il2cpp_merge import _load_rvas, _load_types, _load_members, _load_parameter_counts
+            rvas = _load_rvas(enrich, _load_types(il2cpp), _load_members(il2cpp), _load_parameter_counts(il2cpp))
+            self.assertEqual(rvas, {10: 0x1000, 11: 0x2000})
+
+    def test_overloads_with_equal_counts_stay_unlinked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            il2cpp = Path(tmpdir) / "il2cpp"
+            il2cpp.mkdir()
+            (il2cpp / "types.tsv").write_text("0\tNS\tFoo\n")
+            (il2cpp / "members.tsv").write_text("0\tFoo\tmethod\t10\tRun\n0\tFoo\tmethod\t11\tRun\n")
+            (il2cpp / "method_parameters.tsv").write_text("10\t1\n11\t1\n")
+            enrich = Path(tmpdir) / "enrich"
+            enrich.mkdir()
+            (enrich / "methods_rva.tsv").write_text(
+                "0x1000\tNS.Foo\tRun\tvoid NS_Foo_Run (NS_Foo_o* __this, int32_t a, const MethodInfo* method);\n"
+                "0x2000\tNS.Foo\tRun\tvoid NS_Foo_Run (NS_Foo_o* __this, int32_t b, const MethodInfo* method);\n")
+            from uare.il2cpp_merge import _load_rvas, _load_types, _load_members, _load_parameter_counts
+            rvas = _load_rvas(enrich, _load_types(il2cpp), _load_members(il2cpp), _load_parameter_counts(il2cpp))
+            self.assertEqual(rvas, {})

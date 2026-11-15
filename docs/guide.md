@@ -1,5 +1,5 @@
 > **Current workflow:** `run` now ends with a reconstruction blueprint. Open
-> `blueprint/index.html`; use scene manifests, references, and explicit gaps as the
+> `blueprint/overview.md` and `blueprint/report.json`; use scene manifests, references, and explicit gaps as the
 > primary result. The mandatory checkpoint and category-only rebuild described
 > in the older guide below are superseded by [the reconstruction architecture](redesign.md)
 > and the current `rebuild-game` skill. Legacy exports require repackaging.
@@ -279,9 +279,9 @@ extracted-assets/
     hotdll/                      hot-update assemblies, still encrypted (see decrypt-hotdll below)
     monoscripts.tsv              MonoScript table: class, namespace, assembly
   catalog.json                   every object: class, name, category, source, output path, or note
-  index.html                     self-contained offline browser for catalog.json
+  index.html                     offline catalog browser (small; loads chunks on demand)
   report.json                    object counts, scene/prefab/spine folders, hard links, per-file errors
-  game_model.json                scoped identities, fields and resolved/missing references
+  game_model.json                scoped identities, fields and resolved/missing references (several GB; query it, do not read it whole)
 ```
 
 Scene and prefab folders contain hard links, not copies: editing a file inside a scene folder edits the
@@ -323,7 +323,7 @@ scripts/uare scene-spec "<workdir>" --assets extracted-assets --out "<workdir>/s
 - Add the builder package to the project's `Packages/manifest.json`: `"com.uare.scenebuilder": "file:<path to this repo>/unity/com.uare.scenebuilder"`. Keep its `.meta` files: placeholders in built scenes reference the placeholder script GUID.
 - Build one scene through MCP `execute_code`: `return Uare.SceneBuilder.Editor.UareSceneBuilder.BuildScene("<spec>.json", "Assets/<Game>");`. The scene is saved to `Assets/<Game>/Scenes/`, its files to `Assets/<Game>/Shared/`. The call returns a JSON report (properties applied/unmatched, references bound/missing, placeholder scripts, shader substitutions, settings changes).
 - Safety: everything is validated before the first write; an existing scene or a differing project file is never replaced; a failed build leaves an empty scene, not a half-built one. To rebuild a scene, delete its `.unity` file first.
-- Scripts that are not in the project become `UareMissingScript` placeholders that store the original class, namespace, assembly, object ID and fields. Shaders the project lacks are replaced by URP sprite or UI shaders and listed in the report.
+- Scripts that are not in the project become `UareMissingScript` placeholders that store the original class, namespace, assembly, object ID and fields. Shaders the project lacks are replaced by a sprite or UI shader of the project's render pipeline (`Sprites/Default` on Built-in, the URP unlit sprite shader on URP, `UI/Default` for UI) and listed in the report.
 - Tests: add `"testables": ["com.uare.scenebuilder"]` to the manifest. EditMode tests cover property writing; the PlayMode test loads every scene under `Assets` for 120 frames and appends results to `Logs/uare-playmode.jsonl`.
 - Spec v2 also carries each scene's RenderSettings and LightmapSettings, every saved material property (textures with scale/offset, floats, ints, colors, keywords, render queue), the original texture settings (filter, wrap, mipmaps, readable, Alpha8) and ScriptableObject assets such as TMP font assets and Spine `SkeletonDataAsset`/`SpineAtlasAsset`, rebuilt from their own fields when their script exists in the project. Text files keep their original TextAsset name; `.skel` becomes `.skel.txt` and `.atlas` becomes `.atlas.bytes`, because spine-unity's importer acts on `.skel.bytes`/`.atlas.txt` and can open modal dialogs.
 - Root order: a build keeps no editor root order. A probe bundle on 2022.3 showed that Unity loads the roots of a built scene in path-ID order, so the rebuilt order (`rootOrderBasis: path_id`) is the order the shipped game sees at runtime.

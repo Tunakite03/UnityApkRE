@@ -8,9 +8,11 @@ import html
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from uare.addressables import AddressableAssetPaths, asset_paths as catalog_asset_paths
 from uare.game_model import (GameModel, Json, ModelError, ObjectRecord, Reference, array,
                             closure, identity, load_model, outgoing, read_json, record, save_model,
                             string, write_json)
@@ -28,6 +30,8 @@ _GUID_ANCHORS = {
     "f952c082cb03451daed3ee968ac6c63e": "Default Style Sheet",  # TextMeshPro default style sheet
 }
 GUID_FILE_EVIDENCE = "serialized file named by source asset GUID (verified by package GUID anchors)"
+CATALOG_PREFAB_EVIDENCE = "AssetBundle.m_Container GUID + Addressables catalog path"
+CATALOG_SCENE_EVIDENCE = "AssetBundle.m_SceneHashes GUID + Addressables catalog path"
 
 
 @dataclass(frozen=True)
@@ -174,11 +178,23 @@ def _root_game_objects(ids: set[str], by_id: dict[str, ObjectRecord],
     return [oid for oid in roots if oid in ids]
 
 
+def _catalog_aliases(aliases: dict[str, list[str]], asset_paths: Mapping[str, str]) -> dict[str, list[str]]:
+    """Container keys that are asset GUIDs, replaced by the path an Addressables catalog records."""
+    return {oid: [asset_paths[key] for key in keys if key in asset_paths]
+            for oid, keys in aliases.items() if any(key in asset_paths for key in keys)}
+
+
 def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
-                    edges: dict[str, tuple[Reference, ...]]) -> list[ScopeSpec]:
+                    edges: dict[str, tuple[Reference, ...]],
+                    asset_paths: Mapping[str, str] | None = None) -> list[ScopeSpec]:
+    """Scenes, prefabs and unclassified trees. `asset_paths` (asset GUID -> path from an Addressables
+    catalog) names container entries and streamed scenes whose keys are GUIDs; it never overrides
+    a path the bundle itself records."""
     aliases = _bundle_assets(model, edges)
+    catalog_aliases = _catalog_aliases(aliases, asset_paths or {})
     guid_layout = guid_named_layout(model)
     scene_hashes: dict[tuple[str, str], set[str]] = defaultdict(set)
+    catalog_scenes: dict[tuple[str, str], set[str]] = defaultdict(set)
     for obj in model.objects:
         if obj.class_name != "AssetBundle" or obj.data.get("m_IsStreamedSceneAssetBundle") is not True:
             continue
@@ -191,6 +207,9 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
                 # Streamed scenes have null container PPtrs. Unity records their
                 # serialized file identities separately, scoped to this bundle.
                 scene_hashes[obj.source, pair[1]].add(pair[0])
+            elif (asset_paths and isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and
+                    isinstance(pair[1], str) and asset_paths.get(pair[0], "").endswith(".unity")):
+                catalog_scenes[obj.source, pair[1]].add(asset_paths[pair[0]])
     build_orders = [o for o in model.objects if o.class_name == "BuildSettings" and
                     isinstance(o.data.get("m_Scenes"), list)]
     build_order = build_orders[0].data["m_Scenes"] if len(build_orders) == 1 else []
@@ -202,13 +221,16 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
         ids = by_file[file.source, file.serialized_file]
         match = _LEVEL.fullmatch(file.serialized_file)
         hashed_scenes = scene_hashes.get((file.source, file.serialized_file), set())
-        scene_aliases = sorted(hashed_scenes | {
+        own_scenes = sorted(hashed_scenes | {
             alias for oid in ids for alias in aliases.get(oid, []) if alias.endswith(".unity")})
+        catalog_named = [] if own_scenes else sorted(catalog_scenes.get((file.source, file.serialized_file), set()))
+        scene_aliases = own_scenes or catalog_named
         if match or scene_aliases or file.serialized_file.endswith(".unity"):
             index = int(match[1]) if match else None
             name = scene_aliases[0] if scene_aliases else file.serialized_file
             evidence = ("AssetBundle.m_SceneHashes" if hashed_scenes else
-                        "asset_container" if scene_aliases else "serialized_filename")
+                        "asset_container" if own_scenes else
+                        CATALOG_SCENE_EVIDENCE if catalog_named else "serialized_filename")
             if index is not None and isinstance(build_order, list) and index < len(build_order):
                 item = build_order[index]
                 if isinstance(item, str):
@@ -216,15 +238,24 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
             specs.append(ScopeSpec("scene", name, file.source, file.serialized_file, frozenset(ids), None,
                                    index, evidence))
         elif any(by_id[oid].class_name == "GameObject" for oid in ids):
-            prefab_roots = [oid for oid in ids if by_id[oid].class_name == "GameObject" and
-                            any(a.endswith(".prefab") for a in aliases.get(oid, []))]
+            prefab_names: dict[str, tuple[str, str]] = {}
+            for oid in ids:
+                if by_id[oid].class_name != "GameObject":
+                    continue
+                own = next((a for a in aliases.get(oid, []) if a.endswith(".prefab")), None)
+                listed = next((a for a in catalog_aliases.get(oid, []) if a.endswith(".prefab")), None)
+                if own:
+                    prefab_names[oid] = (own, "AssetBundle.m_Container")
+                elif listed:
+                    prefab_names[oid] = (listed, CATALOG_PREFAB_EVIDENCE)
+            prefab_roots = sorted(prefab_names)
             covered: set[str] = set()
-            for oid in sorted(prefab_roots):
+            for oid in prefab_roots:
                 members = _structural_ids(oid, by_id, edges)
                 covered.update(members)
-                specs.append(ScopeSpec("prefab", next(a for a in aliases[oid] if a.endswith(".prefab")),
-                                       file.source, file.serialized_file, frozenset(members), oid, None,
-                                       "AssetBundle.m_Container"))
+                name, evidence = prefab_names[oid]
+                specs.append(ScopeSpec("prefab", name, file.source, file.serialized_file, frozenset(members),
+                                       oid, None, evidence))
             remaining = ids - covered
             roots = _root_game_objects(remaining, by_id, edges)
             if guid_layout and not prefab_roots and _GUID_FILE.fullmatch(file.serialized_file) and len(roots) == 1:
@@ -241,11 +272,11 @@ def classify_scopes(model: GameModel, by_id: dict[str, ObjectRecord],
     return specs
 
 
-def scene_reports(model: GameModel) -> list[dict[str, Json]]:
+def scene_reports(model: GameModel, asset_paths: Mapping[str, str] | None = None) -> list[dict[str, Json]]:
     by_id = {o.id: o for o in model.objects}
     edges = outgoing(model)
     reports: list[dict[str, Json]] = []
-    for spec in classify_scopes(model, by_id, edges):
+    for spec in classify_scopes(model, by_id, edges, asset_paths):
         ids = set(spec.object_ids)
         reachable = closure(ids, edges)
         direct = {r.target_id for oid in ids for r in edges.get(oid, ()) if r.target_id and r.target_id not in ids}
@@ -430,8 +461,9 @@ def library_inventory(model: GameModel, workdir: Path) -> list[Json]:
             for (kind, name), sources in sorted(libraries.items())]
 
 
-def build_report(model: GameModel, workdir: Path) -> dict[str, Json]:
-    scopes = scene_reports(model)
+def build_report(model: GameModel, workdir: Path,
+                 scopes: list[dict[str, Json]] | None = None) -> dict[str, Json]:
+    scopes = scene_reports(model) if scopes is None else scopes
     statuses = Counter(ref.status for ref in model.references)
     data_statuses = Counter(obj.data_status for obj in model.objects)
     analysis_path = workdir / "analysis" / "report.json"
@@ -446,7 +478,7 @@ def build_report(model: GameModel, workdir: Path) -> dict[str, Json]:
                                 "object_data": dict(data_statuses), "references": dict(statuses),
                                 "denominator": "objects and serialized references in the supplied readable files",
                                 "remote_content": "not_verified", "runtime": "not_verified"},
-                   "scopes": scopes, "dependencies": dependencies(model, workdir),
+                   "scopes": [scope_summary(scope) for scope in scopes], "dependencies": dependencies(model, workdir),
                    "script_inventory": script_inventory(model, workdir),
                    "library_inventory": library_inventory(model, workdir),
                    "behavior_claims": behavior_claims(workdir, scope_ids),
@@ -461,17 +493,26 @@ def build_report(model: GameModel, workdir: Path) -> dict[str, Json]:
                    "validation": {"unity_import": "not_tested", "compilation": "not_tested", "play_mode": "not_tested"}}, "blueprint")
 
 
+def scope_summary(scope: dict[str, Json]) -> dict[str, Json]:
+    """The part of a scope that report.json keeps; the full scope is written to scopes/<id>.js."""
+    return {"id": scope["id"], "kind": scope["kind"], "name": scope["name"], "source": scope["source"],
+            "classification_evidence": scope["classification_evidence"],
+            "object_count": len(array(scope["object_ids"], "object_ids")),
+            "unresolved_count": len(array(scope["unresolved_references"], "unresolved_references"))}
+
+
 def _markdown(report: dict[str, Json]) -> str:
     lines = ["# Game reconstruction blueprint", "", "## Evidence coverage", "", "```json",
-             json.dumps(report["coverage"], indent=2), "```", "", "## Scenes and prefab evidence", ""]
+             json.dumps(report["coverage"], indent=2), "```", "", "## Scenes and prefab evidence", "",
+             "Full scope detail (hierarchy, assets, references) is in `scopes/<id>.js`.", ""]
     for item in array(report["scopes"], "scopes"):
         scope = record(item, "scope")
         sid = string(scope["id"], "scope.id")
         # JSON quoting prevents untrusted names from becoming Markdown headings or HTML.
         name = html.escape(json.dumps(scope["name"], ensure_ascii=False))
-        lines.extend([f"- {name} ({scope['kind']}): [manifest](scopes/{sid}.json)",
-                      f"  - Objects: {len(array(scope['object_ids'], 'ids'))}; unresolved references: "
-                      f"{len(array(scope['unresolved_references'], 'refs'))}. Logic: unknown; Play Mode: not tested."])
+        lines.extend([f"- {name} ({scope['kind']}): [detail](scopes/{sid}.js)",
+                      f"  - Objects: {scope['object_count']}; unresolved references: "
+                      f"{scope['unresolved_count']}. Logic: unknown; Play Mode: not tested."])
     lines.extend(["", "## Dependencies", ""])
     for dep in array(report["dependencies"], "dependencies"):
         row = record(dep, "dependency")
@@ -492,72 +533,106 @@ def _markdown(report: dict[str, Json]) -> str:
     return "\n".join(lines)
 
 
-def _write_object_chunks(staging: Path, model: GameModel) -> list[dict[str, object]]:
+def _js_payload(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True).replace("<", "\\u003c")
+
+
+def _write_object_chunks(staging: Path, model: GameModel) -> None:
+    """One script per id prefix: object metadata and serialized fields, loaded on demand by index.html."""
     chunks: dict[str, dict[str, dict[str, Json]]] = defaultdict(dict)
-    summaries: list[dict[str, object]] = []
     for obj in model.objects:
-        chunks[obj.id[:2]][obj.id] = obj.data
-        summaries.append(asdict(replace(obj, data=obj.data if obj.class_name == "MonoScript" else {})))
+        chunks[obj.id[:2]][obj.id] = {
+            "class_name": obj.class_name, "name": obj.name, "source": obj.source,
+            "serialized_file": obj.serialized_file, "path_id": obj.path_id, "data_status": obj.data_status,
+            "issues": list(obj.issues), "output": obj.output, "data": obj.data}
     directory = staging / "objects"
     directory.mkdir()
-    for prefix, fields in sorted(chunks.items()):
-        payload = json.dumps(fields, ensure_ascii=True).replace("<", "\\u003c")
-        (directory / f"{prefix}.js").write_text(f"window.uareReceiveObjects({payload});\n", encoding="utf-8")
-    return summaries
+    for prefix, entries in sorted(chunks.items()):
+        (directory / f"{prefix}.js").write_text(f"window.uareReceiveObjects({_js_payload(entries)});\n", encoding="utf-8")
 
 
-def write_blueprint(workdir: Path, out_dir: Path, model: GameModel) -> BlueprintResult:
-    report = build_report(model, workdir)
+_PAGE_REPORT_KEYS = ("schema", "schema_version", "engine", "coverage", "scopes", "dependencies",
+                     "behavior_claims", "observations", "blockers", "limitations", "validation")
+
+
+def _catalog_record(workdir: Path, catalog: AddressableAssetPaths) -> dict[str, Json]:
+    path = Path(catalog.source).resolve()
+    try:
+        shown = path.relative_to(workdir.resolve()).as_posix()
+    except ValueError:
+        shown = path.as_posix()
+    return {"path": shown, "sha256": catalog.sha256, "asset_paths": len(catalog.paths),
+            "ambiguous": catalog.ambiguous}
+
+
+def write_blueprint(workdir: Path, out_dir: Path, model: GameModel,
+                    catalog: AddressableAssetPaths | None = None) -> BlueprintResult:
+    scopes = scene_reports(model, catalog.paths if catalog else None)
+    report = build_report(model, workdir, scopes)
+    if catalog:
+        report["addressables_catalog"] = _catalog_record(workdir, catalog)
     with staged_output(out_dir) as staging:
-        save_model(staging / "game_model.json", model)
         write_json(staging / "report.json", report)
-        for scope in array(report["scopes"], "scopes"):
-            row = record(scope, "scope")
-            write_json(staging / "scopes" / f"{row['id']}.json", row)
+        (staging / "scopes").mkdir()
+        for scope in scopes:
+            (staging / "scopes" / f"{scope['id']}.js").write_text(
+                f"window.uareReceiveScope({_js_payload(scope)});\n", encoding="utf-8")
         (staging / "overview.md").write_text(_markdown(report), encoding="utf-8")
-        summaries = _write_object_chunks(staging, model)
-        payload = json.dumps({"report": report, "objects": summaries,
-                              "references": [asdict(r) for r in model.references]}, ensure_ascii=True).replace("<", "\\u003c")
-        (staging / "index.html").write_text(_HTML.replace("__PAYLOAD__", payload), encoding="utf-8")
-    scopes = [record(s, "scope") for s in array(report["scopes"], "scopes")]
+        _write_object_chunks(staging, model)
+        # The page shows only summaries; full script and library inventories stay in report.json.
+        page_report = {key: report[key] for key in _PAGE_REPORT_KEYS}
+        (staging / "index.html").write_text(_HTML.replace("__PAYLOAD__", _js_payload({"report": page_report})),
+                                            encoding="utf-8")
     return BlueprintResult(len(model.objects), sum(s["kind"] == "scene" for s in scopes),
                            sum(s["kind"] == "prefab" for s in scopes),
                            sum(r.status not in {"resolved", "null"} for r in model.references), str(out_dir))
 
 
-def blueprint(workdir: Path, out_dir: Path, assets_dir: Path) -> BlueprintResult:
+def blueprint(workdir: Path, out_dir: Path, assets_dir: Path,
+              addressables_catalog: Path | None = None) -> BlueprintResult:
     source = assets_dir / "game_model.json"
     if not source.is_file():
         raise ModelError(f"Blueprint needs scoped object data; rerun `uare package` with this version; source={source}")
-    return write_blueprint(workdir, out_dir, load_model(source))
+    # Parse the catalog first: a malformed catalog fails before the multi-gigabyte model is loaded.
+    catalog = catalog_asset_paths(addressables_catalog) if addressables_catalog else None
+    return write_blueprint(workdir, out_dir, load_model(source), catalog)
 
 
 _HTML = """<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Game reconstruction blueprint</title>
-<style>body{font:15px/1.5 system-ui;margin:0;color:#e5e9f0;background:#111827}header{padding:20px 28px;border-bottom:1px solid #374151}main{display:grid;grid-template-columns:280px minmax(0,1fr)}nav,article{padding:20px;overflow:auto}nav{border-right:1px solid #374151}button,input{font:inherit;padding:8px;background:#1f2937;color:inherit;border:1px solid #64748b;border-radius:4px}button{cursor:pointer;text-align:left;margin:3px}nav button{display:block;width:100%}button:focus-visible,input:focus-visible{outline:3px solid #38bdf8}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#1f2937;padding:12px}small{color:#a9b8cc}details{margin:8px 0}h1{margin:0} @media(max-width:700px){main{grid-template-columns:1fr}nav{border-bottom:1px solid #374151}}</style>
+<style>body{font:15px/1.5 system-ui;margin:0;color:#e5e9f0;background:#111827}header{padding:20px 28px;border-bottom:1px solid #374151}main{display:grid;grid-template-columns:280px minmax(0,1fr)}nav,article{padding:20px;overflow:auto;max-height:calc(100vh - 90px)}nav{border-right:1px solid #374151}button{display:block;width:100%;text-align:left;margin:4px 0;padding:6px;color:inherit;background:#1f2937;border:1px solid #374151;cursor:pointer}input{width:100%;box-sizing:border-box;margin:8px 0;padding:6px;background:#0b1220;color:inherit;border:1px solid #374151}pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;padding:12px}@media (max-width:760px){main{grid-template-columns:1fr}nav{border-right:0}}</style>
 <header><h1>Game reconstruction blueprint</h1><small>Serialized evidence · Unknown behavior stays unknown · Unity validation pending</small></header>
-<main><nav aria-label="Game navigation"><button id="overview">Overview</button><label for="search">Find scene, asset or script</label><input id="search" type="search"><div id="scopes"></div><div id="results"></div></nav><article id="detail" aria-live="polite"></article></main>
-<script id="data" type="application/json">__PAYLOAD__</script><script>
+<main><nav aria-label="Game navigation"><button id="overview">Overview</button><label for="search">Find scene or prefab</label><input id="search" type="search"><label for="object-id">Open object by id</label><input id="object-id" type="text" autocomplete="off"><div id="scopes"></div></nav><article id="detail" aria-live="polite"></article></main>
+<script id="data" type="application/json">__PAYLOAD__</script>
+<script>
 'use strict';
 const data=JSON.parse(document.getElementById('data').textContent),report=data.report;
-const objects=new Map(data.objects.map(o=>[o.id,o])),out=new Map(),used=new Map();
-const objectFields=new Map(),chunks=new Map();
-window.uareReceiveObjects=entries=>{for(const [id,fields]of Object.entries(entries))objectFields.set(id,fields)};
-function loadFields(id){const prefix=id.slice(0,2);if(!chunks.has(prefix)){chunks.set(prefix,new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='objects/'+prefix+'.js';script.onload=resolve;script.onerror=()=>{chunks.delete(prefix);reject(new Error('Cannot load object data. Keep index.html and the objects folder together.'))};document.head.append(script)}))}return chunks.get(prefix).then(()=>{if(!objectFields.has(id))throw new Error('Object data is missing from its chunk.');return objectFields.get(id)})}
-for(const r of data.references){if(!out.has(r.source_id))out.set(r.source_id,[]);out.get(r.source_id).push(r);if(r.target_id){if(!used.has(r.target_id))used.set(r.target_id,[]);used.get(r.target_id).push(r)}}
+const scopeDetail=new Map(),objectEntries=new Map(),loaded=new Set();
+window.uareReceiveScope=s=>{scopeDetail.set(s.id,s)};
+window.uareReceiveObjects=entries=>{for(const [id,e] of Object.entries(entries))objectEntries.set(id,e)};
+function loadScript(src){if(loaded.has(src))return Promise.resolve();return new Promise((resolve,reject)=>{const s=document.createElement('script');s.src=src;s.onload=()=>{loaded.add(src);resolve()};s.onerror=()=>reject(new Error('Cannot load '+src+'. Keep index.html next to the scopes and objects folders.'));document.head.append(s)})}
+function loadScope(id){return loadScript('scopes/'+id+'.js').then(()=>{if(!scopeDetail.has(id))throw new Error('Scope data is missing: '+id);return scopeDetail.get(id)})}
+function loadObject(id){if(objectEntries.has(id))return Promise.resolve(objectEntries.get(id));return loadScript('objects/'+id.slice(0,2)+'.js').then(()=>{if(!objectEntries.has(id))throw new Error('Object is missing from its chunk: '+id);return objectEntries.get(id)})}
 const detail=document.getElementById('detail');
-function element(tag,text,parent){const e=document.createElement(tag);e.textContent=text;parent.append(e);return e}
-function show(title){detail.replaceChildren();element('h2',title,detail)}
-function json(value,parent){element('pre',JSON.stringify(value,null,2),parent)}
-function link(id,parent,prefix=''){const o=objects.get(id);if(!o){element('p',prefix+'Unresolved object',parent);return}const b=element('button',prefix+(o.name||o.class_name)+' · '+o.class_name,parent);b.onclick=()=>object(id)}
-function object(id){const o=objects.get(id);show(o.name||o.class_name);element('p',o.source+' / '+o.serialized_file+' #'+o.path_id,detail);element('p','Extraction: '+o.data_status,detail);for(const issue of o.issues)element('p',issue,detail);const fields=element('details','',detail);element('summary','Serialized fields (load on demand)',fields);let loaded=false;fields.ontoggle=()=>{if(fields.open&&!loaded){loaded=true;const status=element('p','Loading fields…',fields);loadFields(id).then(value=>{status.remove();json(value,fields)}).catch(error=>{status.textContent=error.message;loaded=false})}};const script=report.script_inventory.find(s=>s.object_id===id);if(script){element('h3','Script metadata and members',detail);json(script,detail)}element('h3','References',detail);for(const r of out.get(id)||[]){if(r.target_id)link(r.target_id,detail,r.field+' → ');else element('p',r.field+': '+r.status,detail)}element('h3','Used by',detail);for(const r of used.get(id)||[])link(r.source_id,detail,r.field+' ← ')}
-function tree(nodes,parent){for(const n of nodes){const d=element('details','',parent);element('summary',n.name||n.id,d);link(n.id,d);for(const c of n.components||[]){if(c.id)link(c.id,d);else element('p','Component: '+c.status,d)}tree(n.children||[],d)}}
-function scope(s){show(s.name);element('p',s.kind+' · '+s.classification_evidence,detail);element('h3','Hierarchy and components',detail);tree(s.roots,detail);for(const [label,key]of [['Direct assets','direct_assets'],['Transitive assets','transitive_assets'],['Animations','animation_objects'],['Scene settings','scene_settings']]){element('h3',label,detail);for(const id of s[key])link(id,detail)}element('h3','Behavior analysis',detail);const claims=report.behavior_claims.filter(c=>c.scope_id===s.id);if(!claims.length)element('p','No verified behavior analysis yet. Inspect script fields, events and code evidence.',detail);for(const c of claims){element('p',c.system+': '+c.statement+' ['+c.basis+']',detail);json(c.citations,detail)}element('h3','Script bindings, events and missing evidence',detail);json({script_bindings:s.script_bindings,events:s.events,logic:s.logic,dynamic_loading:s.dynamic_loading,unresolved_references:s.unresolved_references,hierarchy_issues:s.hierarchy_issues},detail)}
-function overview(){show('Reconstruction readiness');element('p','The supplied files describe '+report.coverage.objects+' objects in '+report.coverage.files+' serialized files. Coverage does not include undiscovered or remote content.',detail);element('h3','Serialized references',detail);const counts=element('ul','',detail);for(const [key,value] of Object.entries(report.coverage.references))element('li',key+': '+value,counts);element('h3','Object recovery',detail);const states=element('ul','',detail);for(const [key,value] of Object.entries(report.coverage.object_data))element('li',key+': '+value,states);element('h3','Engine',detail);element('p','Backend: '+report.engine.scripting_backend+' · Unity versions: '+Object.keys(report.engine.unity_versions).join(', '),detail);element('h3','Packages and services',detail);if(!report.dependencies.length)element('p','No supported signatures found in the supplied evidence. This does not prove that dependencies are absent.',detail);for(const dep of report.dependencies){const row=element('details','',detail);element('summary',dep.name+' · '+dep.kind+' · version unknown',row);element('p','Runtime usage unverified. Evidence:',row);for(const source of dep.evidence){if(objects.has(source))link(source,row);else element('p',source,row)}}const libraries=element('details','',detail);element('summary','All managed and native libraries, including unclassified dependencies',libraries);for(const item of report.library_inventory)element('p',item.name+' · '+item.kind+' · '+item.classification,libraries);element('h3','Core game and system analysis',detail);const claims=report.behavior_claims.filter(c=>c.scope_id==='game');if(!claims.length)element('p','Core loop, progression, saving and backend behavior have not been established. Add analysis with source citations.',detail);for(const c of claims){element('p',c.system+': '+c.statement+' ['+c.basis+']',detail);json(c.citations,detail)}element('h3','Observed behavior',detail);for(const o of report.observations)element('p',o.action+' → '+o.result+' · '+o.evidence,detail);if(!report.observations.length)element('p','No runtime observations supplied.',detail);element('h3','Missing evidence and limits',detail);const limits=element('ul','',detail);for(const item of [...report.blockers,...report.limitations])element('li',item,limits);element('h3','Validation',detail);element('p','Unity import: not tested · Compilation: not tested · Play Mode: not tested',detail)}
-const nav=document.getElementById('scopes');for(const s of report.scopes){const b=element('button',s.name+' · '+s.kind,nav);b.onclick=()=>scope(s)}
+function el(tag,text,parent){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;parent.append(e);return e}
+function show(title){detail.replaceChildren();el('h2',title,detail)}
+function pre(value,parent){el('pre',JSON.stringify(value,null,2),parent)}
+function showError(e){show('Error');el('p',e.message,detail)}
+function objectButton(id,label,parent){const b=el('button',label,parent);b.onclick=()=>object(id).catch(showError);return b}
+function list(label,items,parent){el('h3',label+' ('+items.length+')',parent);pre(items.slice(0,200),parent);if(items.length>200)el('p','Showing the first 200 entries.',parent)}
+function tree(nodes,parent){for(const n of nodes||[]){const d=el('details','',parent);el('summary',n.name||n.id,d);objectButton(n.id,'Open object '+String(n.id).slice(0,12),d);for(const c of n.components||[]){if(c.id)objectButton(c.id,'Component '+String(c.id).slice(0,12),d);else el('p','Component: '+c.status,d)}tree(n.children,d)}}
+function object(id){return loadObject(id).then(o=>{show(o.name||o.class_name);el('p',o.source+' / '+o.serialized_file+' #'+o.path_id,detail);el('p','Extraction: '+o.data_status,detail);for(const issue of o.issues)el('p',issue,detail);if(o.output)el('p','Exported: '+o.output,detail);el('h3','Serialized fields',detail);pre(o.data,detail)})}
+function scope(id){return loadScope(id).then(s=>{show(s.name);el('p',s.kind+' · '+s.classification_evidence,detail);el('h3','Hierarchy and components',detail);tree(s.roots,detail);list('Direct assets',s.direct_assets,detail);list('Transitive assets',s.transitive_assets,detail);list('Unresolved references',s.unresolved_references,detail);list('Hierarchy issues',s.hierarchy_issues,detail);list('Script bindings',s.script_bindings,detail);list('Events (not executed)',s.events,detail);el('h3','Logic',detail);pre(s.logic,detail)})}
+function overview(){show('Reconstruction readiness');el('p','The supplied files describe '+report.coverage.objects+' objects in '+report.coverage.files+' serialized files. Coverage does not include undiscovered or remote content.',detail);el('h3','Limitations',detail);for(const l of report.limitations)el('p',l,detail);el('h3','Validation',detail);pre(report.validation,detail);el('h3','Coverage',detail);pre(report.coverage,detail)}
+const nav=document.getElementById('scopes');
+function renderNav(filter){nav.replaceChildren();const q=filter.toLowerCase();let shown=0;for(const s of report.scopes){if(q&&!(s.name+' '+s.kind).toLowerCase().includes(q))continue;if(shown>=300)break;shown++;const b=el('button',s.name+' · '+s.kind+' · '+s.object_count+' objects',nav);b.onclick=()=>scope(s.id).catch(showError)}el('p',shown+' shown (at most 300). Type in the search box to narrow the list.',nav)}
+renderNav('');
 document.getElementById('overview').onclick=overview;
-document.getElementById('search').oninput=e=>{const q=e.target.value.toLowerCase(),results=document.getElementById('results');results.replaceChildren();let count=0;for(const o of data.objects){if(q&&(o.name+' '+o.class_name+' '+o.source+' '+JSON.stringify(o.class_name==='MonoScript'?o.data:{})).toLowerCase().includes(q)){count++;if(count<=100)link(o.id,results)}}element('p',count+' objects; showing first 100',results)};
-const initial=location.hash.slice(1),initialScope=report.scopes.find(s=>initial==='scope/'+s.id);
-if(initialScope)scope(initialScope);else if(initial.startsWith('object/')&&objects.has(initial.slice(7)))object(initial.slice(7));else overview();
+document.getElementById('search').oninput=e=>renderNav(e.target.value);
+document.getElementById('object-id').onkeydown=e=>{if(e.key==='Enter'&&e.target.value.trim())object(e.target.value.trim()).catch(showError)};
+const initial=location.hash.slice(1);
+if(initial.startsWith('scope/'))scope(initial.slice(6)).catch(showError);
+else if(initial.startsWith('object/'))object(initial.slice(7)).catch(showError);
+else overview();
 </script></html>"""

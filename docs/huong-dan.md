@@ -1,5 +1,5 @@
 > **Current workflow:** `run` now ends with a reconstruction blueprint. Open
-> `blueprint/index.html`; use scene manifests, references and explicit gaps as the
+> `blueprint/overview.md` và `blueprint/report.json`; dùng manifest cảnh, tham chiếu và các khoảng trống đã ghi nhận như
 > primary result. The mandatory checkpoint and category-only rebuild described
 > in the older guide below are superseded by [the reconstruction architecture](redesign.md)
 > and the current `rebuild-game` skill. Legacy exports require repackaging.

@@ -2,8 +2,9 @@
 
 AssetRipper (`AssetRipper.GUI.Free --headless --port N`) writes a Unity project with native assets:
 prefabs, AnimationClips, AnimatorControllers and override controllers, materials, meshes, fonts, and
-textures whose import settings carry the original sprites (`SpriteExportMode=Native`: Single/Multiple
-sheets with rects, pivots, borders and pixels per unit). An extracted APK tree is presented to it in the
+textures exported as whole images (`SpriteExportMode=Single`). Native sprite sheets (`Native`) are not
+used: they abort the export with a duplicate-key error when two sprites share a name (for example
+"BlueBg" in this build). An extracted APK tree is presented to it in the
 Android layout (`assets/bin/Data`, `lib/`) through symlinks so it recognises the IL2CPP backend.
 
 Script fields need the IL2CPP type information; when AssetRipper cannot initialise it (protected or
@@ -41,7 +42,7 @@ _EXECUTABLES = ("AssetRipper.GUI.Free", "AssetRipper.GUI.Free.exe")
 # Fixed export settings: native sprites (sprite sheets in texture importers) and deterministic text/image formats.
 SETTINGS: dict[str, str] = {
     "BundledAssetsExportMode": "DirectExport", "ScriptContentLevel": "Level2", "AudioExportFormat": "Default",
-    "ImageExportFormat": "Png", "LightmapTextureExportFormat": "Yaml", "SpriteExportMode": "Native",
+    "ImageExportFormat": "Png", "LightmapTextureExportFormat": "Yaml", "SpriteExportMode": "Single",
     "ShaderExportMode": "Dummy", "TextExportMode": "Parse", "ScriptLanguageVersion": "AutoSafe",
     "ScriptExportMode": "Hybrid", "DefaultVersion": "0.0.0a0", "TargetVersion": "0.0.0a0",
     "PreferOriginalTextureExtension": "true",

@@ -29,7 +29,9 @@ dumps. If the user wants a rebuilt scene or project, switch to
 - When `analyze` reports wrapped metadata or a packed native library, or
   `extracted-assets/scripts/hotdll/` holds encrypted DLLs, run the matching
   decryption step from `../rebuild-game/SKILL.md` (step 2) without asking.
-- Every output directory must be new or empty. Reuse inputs, never overwrite results.
+- Every output directory must be new or empty. Reuse inputs, never overwrite results in place.
+  Once a re-run output is verified, prune its older copies right away
+  (`uare prune <workdir> --keep <new dir> --yes`, see `../../docs/agent-tools.md`).
 
 ## Read and explain the result
 

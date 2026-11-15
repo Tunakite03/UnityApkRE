@@ -141,22 +141,106 @@ def _engine_type_indices(il2cpp_dir: Path) -> frozenset[int]:
     return frozenset(engine)
 
 
-def _load_rvas(enrich_dir: Path | None) -> dict[int, int]:
-    """Parse methods_rva.tsv into {method_index: rva}."""
+# Ghidra loads the ELF at image base 0x100000, while Il2CppDumper reports RVAs relative to the
+# image. Checked on this build: the ELF entry point 0x235c5ec is 0x245c5ec in Ghidra.
+GHIDRA_IMAGE_BASE_OFFSET = 0x100000
+
+
+def _signature_parameter_count(signature: str) -> int | None:
+    """Managed parameter count from an Il2CppDumper C signature, e.g. ``void T_M (T_o* __this, int32_t a, const MethodInfo* method);``.
+
+    The trailing ``const MethodInfo* method`` and a leading ``__this`` are not parameters.
+    """
+    if "(" not in signature or ")" not in signature:
+        return None
+    inner = signature[signature.index("(") + 1: signature.rindex(")")]
+    args = [a.strip() for a in inner.split(",") if a.strip()]
+    if not args or "MethodInfo" not in args[-1]:
+        return None
+    has_this = "__this" in args[0]
+    return len(args) - 1 - (1 if has_this else 0)
+
+
+def _load_parameter_counts(il2cpp_dir: Path) -> dict[int, int]:
+    """method_index -> parameterCount from method_parameters.tsv (written by dump-il2cpp for v31)."""
+    path = il2cpp_dir / "method_parameters.tsv"
+    if not path.is_file():
+        return {}
+    result: dict[int, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            result[int(parts[0])] = int(parts[1])
+    return result
+
+
+def _load_rvas(enrich_dir: Path | None, types: list[tuple[int, str, str]],
+               members: dict[int, dict[str, list[tuple[int, str]]]],
+               parameter_counts: dict[int, int] | None = None) -> dict[int, int]:
+    """Map method indices to RVAs from methods_rva.tsv.
+
+    Two row layouts are accepted:
+    - ``method_index<TAB>rva`` (index keyed, as written by earlier tooling);
+    - ``rva<TAB>class<TAB>method<TAB>signature`` (what ``uare il2cpp-enrich`` writes). These rows
+      carry no metadata index, so they are joined on (full type name, method name). When that
+      pair is unique on both sides it links directly; when it is shared by overloads it links only
+      if exactly one member and one signature have the same parameter count (from
+      ``parameter_counts``). Anything still ambiguous stays unlinked.
+    """
     if enrich_dir is None:
         return {}
     path = enrich_dir / "methods_rva.tsv"
     if not path.is_file():
         return {}
     result: dict[int, int] = {}
+    rvas_by_name: dict[tuple[str, str], list[tuple[int, int | None]]] = defaultdict(list)
     for line in path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
+            continue
+        if parts[0].lower().startswith("0x"):
+            try:
+                rva = int(parts[0], 16)
+            except ValueError:
+                continue
+            if len(parts) >= 3:
+                signature = parts[3] if len(parts) >= 4 else ""
+                rvas_by_name[(parts[1], parts[2])].append((rva, _signature_parameter_count(signature)))
             continue
         try:
             result[int(parts[0])] = int(parts[1], 0)
         except ValueError:
             continue
+    if not rvas_by_name:
+        return result
+
+    counts = parameter_counts or {}
+    full_names = {idx: f"{ns}.{name}" if ns else name for idx, ns, name in types}
+    members_by_name: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for type_idx, kinds in members.items():
+        full = full_names.get(type_idx)
+        if full is None:
+            continue
+        for method_idx, method_name in kinds.get("method", []):
+            members_by_name[(full, method_name)].append(method_idx)
+    for key, indices in members_by_name.items():
+        candidates = rvas_by_name.get(key, [])
+        if len(indices) == 1 and len(candidates) == 1:
+            result.setdefault(indices[0], candidates[0][0])
+            continue
+        # Overloads: pair by parameter count, but only when that count identifies one member and one RVA.
+        by_count_members: dict[int, list[int]] = defaultdict(list)
+        for idx in indices:
+            if idx in counts:
+                by_count_members[counts[idx]].append(idx)
+        by_count_rvas: dict[int, list[int]] = defaultdict(list)
+        for rva, sig_count in candidates:
+            if sig_count is not None:
+                by_count_rvas[sig_count].append(rva)
+        for count, idxs in by_count_members.items():
+            rvas_for_count = by_count_rvas.get(count, [])
+            if len(idxs) == 1 and len(rvas_for_count) == 1:
+                result.setdefault(idxs[0], rvas_for_count[0])
     return result
 
 
@@ -315,7 +399,7 @@ def merge(il2cpp_dir: Path, enrich_dir: Path | None, ghidra_dir: Path | None,
     types = _load_types(il2cpp_dir)
     engine = _engine_type_indices(il2cpp_dir)
     members = _load_members(il2cpp_dir)
-    rvas = _load_rvas(enrich_dir)
+    rvas = _load_rvas(enrich_dir, types, members, _load_parameter_counts(il2cpp_dir))
     ghidra = _load_ghidra_functions(ghidra_dir)
 
     methods_total = methods_with_rva = methods_with_c = files_written = generated_skipped = 0
@@ -335,9 +419,9 @@ def merge(il2cpp_dir: Path, enrich_dir: Path | None, ghidra_dir: Path | None,
                 rva = rvas.get(method_idx)
                 pseudo_c = None
                 ghidra_addr = None
-                if rva and rva in ghidra:
-                    pseudo_c = ghidra[rva]
-                    ghidra_addr = rva
+                if rva and rva + GHIDRA_IMAGE_BASE_OFFSET in ghidra:
+                    ghidra_addr = rva + GHIDRA_IMAGE_BASE_OFFSET
+                    pseudo_c = ghidra[ghidra_addr]
                     methods_with_c += 1
                 if rva:
                     methods_with_rva += 1

@@ -102,8 +102,7 @@ class ModelTests(unittest.TestCase):
             root = Path(tmp)
             save_model(root / "extracted-assets" / "game_model.json", model)
             blueprint(root, root / "blueprint", root / "extracted-assets")
-            recovered = load_model(root / "blueprint" / "game_model.json")
-            self.assertEqual(recovered.objects[0].data["m_Script"], payload)
+            self.assertFalse((root / "blueprint" / "game_model.json").exists())
             page = (root / "blueprint" / "index.html").read_text(encoding="utf-8")
             self.assertNotIn("\\udcc4", page)
             chunk = root / "blueprint" / "objects" / f"{model.objects[0].id[:2]}.js"
@@ -111,7 +110,7 @@ class ModelTests(unittest.TestCase):
             prefix = "window.uareReceiveObjects("
             self.assertTrue(script.startswith(prefix))
             data = json.loads(script[len(prefix):-3])
-            self.assertEqual(data[model.objects[0].id]["m_Script"], payload)
+            self.assertEqual(data[model.objects[0].id]["data"]["m_Script"], payload)
 
 
 class BlueprintTests(unittest.TestCase):
@@ -161,6 +160,41 @@ class BlueprintTests(unittest.TestCase):
         self.assertEqual(report["kind"], "prefab")
         self.assertEqual(report["classification_evidence"], "AssetBundle.m_Container")
 
+    def _guid_container_model(self, key: str) -> GameModel:
+        objects = (obj("bundle", "CAB", 1, "GameObject", {"m_Name": "Player", "m_Component": [{"component": ptr(0, 2)}]}),
+                   obj("bundle", "CAB", 2, "Transform", {"m_GameObject": ptr(0, 1), "m_Father": ptr(0, 0), "m_Children": []}),
+                   obj("bundle", "CAB", 3, "AssetBundle", {"m_Container": [[key, {"asset": ptr(0, 1)}]]}))
+        return resolve((FileRecord("bundle", "CAB", ()),), objects, ())
+
+    def test_guid_container_key_becomes_prefab_only_with_catalog_path(self) -> None:
+        guid = "0123456789abcdef0123456789abcdef"
+        model = self._guid_container_model(guid)
+        self.assertEqual(scene_reports(model)[0]["kind"], "unclassified_hierarchy")
+        report = scene_reports(model, {guid: "Assets/_Resources/Prefab/Player.prefab"})[0]
+        self.assertEqual(report["kind"], "prefab")
+        self.assertEqual(report["name"], "Assets/_Resources/Prefab/Player.prefab")
+        self.assertEqual(report["classification_evidence"], "AssetBundle.m_Container GUID + Addressables catalog path")
+
+    def test_catalog_never_overrides_a_container_path(self) -> None:
+        model = self._guid_container_model("Assets/Player.prefab")
+        report = scene_reports(model, {"Assets/Player.prefab": "Assets/Other.prefab"})[0]
+        self.assertEqual(report["name"], "Assets/Player.prefab")
+        self.assertEqual(report["classification_evidence"], "AssetBundle.m_Container")
+
+    def test_streamed_scene_guid_is_named_by_catalog_path(self) -> None:
+        guid = "fedcba9876543210fedcba9876543210"
+        files = (FileRecord("scenes.bundle", "CAB-index", ()), FileRecord("scenes.bundle", "CAB-main", ()))
+        objects = (
+            obj("scenes.bundle", "CAB-index", 1, "AssetBundle", {
+                "m_IsStreamedSceneAssetBundle": True, "m_SceneHashes": [[guid, "CAB-main"]],
+                "m_Container": [[guid, {"asset": ptr(0, 0)}]]}),
+            obj("scenes.bundle", "CAB-main", 1, "GameObject", {"m_Name": "Light"}))
+        model = resolve(files, objects, ())
+        self.assertFalse(any(r["kind"] == "scene" for r in scene_reports(model)))
+        scenes = [r for r in scene_reports(model, {guid: "Assets/Scene/Main.unity"}) if r["kind"] == "scene"]
+        self.assertEqual([(s["name"], s["classification_evidence"]) for s in scenes],
+                         [("Assets/Scene/Main.unity", "AssetBundle.m_SceneHashes GUID + Addressables catalog path")])
+
     def _guid_file_model(self, anchor_name: str) -> GameModel:
         guid = "000385f0e1866fd4cb29245d14652f36"
         anchor = "8f586378b4e144a9851e7b34d9b748ee"
@@ -194,6 +228,23 @@ class BlueprintTests(unittest.TestCase):
             page = (work / "blueprint" / "index.html").read_text()
             self.assertNotIn("</script><script>alert(1)</script>", page)
             self.assertNotIn("fetch(", page)
+
+    def test_report_keeps_scope_summaries_and_scope_detail_is_a_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            save_model(work / "extracted-assets" / "game_model.json", fixture_model())
+            blueprint(work, work / "blueprint", work / "extracted-assets")
+            report = json.loads((work / "blueprint" / "report.json").read_text())
+            summary = report["scopes"][0]
+            self.assertNotIn("object_ids", summary)
+            self.assertNotIn("roots", summary)
+            self.assertIn("object_count", summary)
+            detail = (work / "blueprint" / "scopes" / f"{summary['id']}.js").read_text(encoding="utf-8")
+            prefix = "window.uareReceiveScope("
+            self.assertTrue(detail.startswith(prefix))
+            self.assertIn("object_ids", json.loads(detail[len(prefix):-3]))
+            self.assertFalse(list((work / "blueprint").glob("scopes/*.json")))
+            self.assertLess((work / "blueprint" / "index.html").stat().st_size, 3_000_000)
 
     def test_observations_validate_scope_and_preserve_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

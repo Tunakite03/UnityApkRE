@@ -14,18 +14,33 @@ capture date, device or workstation for the agent.
    each candidate workspace. Check stage status and artifact presence. A recent
    directory name alone does not establish a complete or compatible capture.
 3. Choose one working workspace for the acquired build. Start with
-   `blueprint/index.html`, `blueprint/overview.md`, `blueprint/report.json` and
-   `extracted-assets/game_model.json` when present. Missing or failed stages must
+   `blueprint/overview.md` and `blueprint/report.json` (both small), then
+   `blueprint/scopes/<id>.js` for one scene or prefab at a time, and
+   `extracted-assets/game_model.json` only through targeted queries (it is several GB).
+   Never read `blueprint/index.html` or `game_model.json` whole: they are for browsers or
+   for `uare` commands, and a full read exceeds an agent's context. Missing or failed stages must
    be completed before treating their outputs as usable evidence.
 4. Keep per-game folder inventories, chosen workspace paths, source hashes,
    capture versions and analysis results inside that game's workspace. Consult
    any supplementary execution/source-coverage reports if provided, but do not
    assume custom reports are standard CLI outputs.
 5. Reuse existing inputs for follow-up analysis. Each producing command requires
-   a new or empty output directory within the workspace. Preserve earlier output
-   and record which verified output is current in the workspace's local notes.
-   A fresh `uare run` requires a new workspace; it does not resume a populated
-   workspace. Use individual stage commands to retry failed stages.
+   a new or empty output directory within the workspace; outputs are never rewritten
+   in place. A fresh `uare run` requires a new workspace; it does not resume a
+   populated workspace. Use individual stage commands to retry failed stages.
+6. Keep one current output per stage. A single `extracted-assets*` copy holds a
+   multi-gigabyte `game_model.json` and `catalog.json`, so stale copies are not kept
+   for comparison. As soon as a new stage output is verified, and before the next
+   stage starts, run `uare prune <workdir> --keep <new dir>` (dry run), check the
+   candidates, then add `--yes`. Removal is limited to the family of each kept
+   directory, so pruning one stage never touches another stage's current output:
+   `extracted-assets*`, AssetRipper attempts (`assetripper*`, `ar-try*`, `ar-diag*`),
+   `export-assets*`, `il2cpp-annotated*`, `il2cpp-tables*`, `il2cpp-enriched*` and
+   `sprite-sheets*`, plus that family's failed `.partial` staging folders. Pass
+   `--keep` once per stage when several were re-run. If the new output fails
+   verification, delete that new directory instead and keep the previous one.
+   Captures, decrypted and decompiled evidence, `blueprint/` and anything outside
+   the workspace are never removed.
 
 Preserve references to raw acquisition folders when consolidating evidence.
 Different builds or cached-content versions must retain their provenance; do not

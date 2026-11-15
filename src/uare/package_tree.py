@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from uare.addressables import AddressableAssetPaths, asset_paths
 from uare.analyze import Layout, resolve_layout
 from uare.blueprint import ScopeSpec, classify_scopes
 from uare.errors import UareError
@@ -125,6 +126,8 @@ class PackageResult:
     # MonoBehaviour field coverage by model data status, and the assemblies that generated type trees.
     mono_behaviours: dict[str, int]
     script_assemblies: tuple[dict[str, str], ...]
+    # Addressables catalog that named GUID-keyed prefabs and scenes (path, sha256, counts), if supplied.
+    addressables_catalog: dict[str, Any] | None = None
 
 
 class PackageLinkError(UareError):
@@ -529,9 +532,11 @@ def _link_limit(staging: Path) -> int:
 class _Packager:
     """Writes one output tree. Holds the staging directory, the catalog and the name registry."""
 
-    def __init__(self, unitypy: Any, root: Path, staging: Path, script_types: ScriptTypes | None) -> None:
+    def __init__(self, unitypy: Any, root: Path, staging: Path, script_types: ScriptTypes | None,
+                 catalog: AddressableAssetPaths | None = None) -> None:
         self._unitypy = unitypy
         self._script_types = script_types
+        self._catalog_paths = catalog
         self._mono_behaviours: Counter[str] = Counter()
         self._root = root
         self._staging = staging
@@ -566,7 +571,7 @@ class _Packager:
         model = resolve(tuple(self._model_files), tuple(self._model_objects), tuple(self._model_issues))
         by_id = {o.id: o for o in model.objects}
         edges = outgoing(model)
-        specs = classify_scopes(model, by_id, edges)
+        specs = classify_scopes(model, by_id, edges, self._catalog_paths.paths if self._catalog_paths else None)
         folders = self._scope_folders(specs)
         placements = self._place_hierarchies(specs, folders, by_id)
         self._resolve_component_outputs(placements)
@@ -585,7 +590,10 @@ class _Packager:
             errors=self._errors, prefabs=sum(1 for s in specs if s.kind == "prefab"), spines=self._spines,
             links=links, most_links_per_file=most_links, issues=tuple(self._layout_issues),
             mono_behaviours=dict(self._mono_behaviours),
-            script_assemblies=tuple(asdict(source) for source in self._script_types.loaded) if self._script_types else ())
+            script_assemblies=tuple(asdict(source) for source in self._script_types.loaded) if self._script_types else (),
+            addressables_catalog=({"path": self._catalog_paths.source, "sha256": self._catalog_paths.sha256,
+                                   "asset_paths": len(self._catalog_paths.paths),
+                                   "ambiguous": self._catalog_paths.ambiguous} if self._catalog_paths else None))
         (write / "report.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False),
                                            encoding="utf-8")
         shutil.rmtree(self._staging / ".scratch", ignore_errors=True)
@@ -972,13 +980,17 @@ def build_unity_version(layout: Layout, candidates: list[Path]) -> str:
     raise ScriptTypesError(f"No serialized file states the Unity version; root={layout.root}")
 
 
-def package(root: Path, out_dir: Path, script_assembly_dirs: Sequence[Path] = ()) -> PackageResult:
+def package(root: Path, out_dir: Path, script_assembly_dirs: Sequence[Path] = (),
+            addressables_catalog: Path | None = None) -> PackageResult:
     """Export every readable asset of an extracted Unity tree into `out_dir` (must not exist yet).
 
     `script_assembly_dirs` supplies managed DLLs whose generated type trees decode MonoBehaviour fields.
+    `addressables_catalog` names bundle prefabs and streamed scenes whose container keys are asset GUIDs.
     """
     require_unitypy()
     unitypy = importlib.import_module("UnityPy")
+    # Parse the catalog before any export work so a malformed catalog fails immediately.
+    catalog = asset_paths(addressables_catalog) if addressables_catalog else None
     layout = resolve_layout(root)
     candidates = _candidates(layout)
     script_types = (load_script_types(build_unity_version(layout, candidates), script_assembly_dirs)
@@ -990,7 +1002,7 @@ def package(root: Path, out_dir: Path, script_assembly_dirs: Sequence[Path] = ()
         for sub in ("shared", "evidence", "scenes", "scripts/hotdll"):
             (staging / sub).mkdir(parents=True)
         _require_hard_links(staging)
-        packager = _Packager(unitypy, layout.root, staging, script_types)
+        packager = _Packager(unitypy, layout.root, staging, script_types, catalog)
         packager.run(candidates)
         result = packager.finish(layout.root)
     event(LOG, logging.INFO, "package_done", files=result.files, objects=result.objects,

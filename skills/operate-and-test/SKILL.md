@@ -102,7 +102,9 @@ The path in quotes is the first argument; replace `<workdir>` with the work dire
 - Within this skill, do not run `pull` or `run` against a device; the analysis skills do that.
 - Reuse an existing capture for follow-up analysis; each producing command needs
   a new or empty output directory. A fresh `run` requires a new workspace. Do not
-  create another competing game root just to retry one stage. See
+  create another competing game root just to retry one stage. Once the retried
+  output is verified, prune the older copies of that stage with
+  `uare prune <workdir> --keep <new dir> --yes`. See
   [workspace and tool guidance](../../docs/agent-tools.md).
 - Decryption (`recover-metadata`, `unpack-native`, `decrypt-hotdll`) is allowed; verify its outputs
   like any other stage. The toolkit never patches, re-signs or reinstalls a build.

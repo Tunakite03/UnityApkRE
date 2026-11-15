@@ -112,8 +112,9 @@ A packed library can show low average entropy, because a large filler region dil
 resolved/null/missing/ambiguous references. Catalog rows carry `object_id` and
 `serialized_file`; `path_id` is not a global key.
 
-`blueprint <workdir> --out DIR` writes `report.json`, `scopes/*.json`, `overview.md`
-and a self-contained `index.html`. Scene scopes join hierarchy, script bindings,
+`blueprint <workdir> --out DIR` writes `report.json` (scope summaries only), `scopes/<id>.js`
+(full scope detail, one script per scene or prefab), `overview.md`, `objects/<prefix>.js` and a small
+`index.html` that loads those scripts on demand. Scene scopes join hierarchy, script bindings,
 assets, animation data and serialized events. Script metadata provides member
 name evidence, not method behavior. Dependency versions and runtime use stay
 unknown. See `docs/redesign.md` for optional behavior/observation input contracts.

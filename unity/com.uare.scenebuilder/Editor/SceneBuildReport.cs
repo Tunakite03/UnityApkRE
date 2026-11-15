@@ -67,6 +67,8 @@ namespace Uare.SceneBuilder.Editor
         public int referencesUnresolved;
         public int referencesToDroppedComponents;
         public List<NameCount> referencesMissing = new List<NameCount>();
+        // References pointed at Unity's built-in resources instead of an imported copy.
+        public int builtinReferences;
         public List<string> rejectedSamples = new List<string>();
 
         public int assetsCopied;

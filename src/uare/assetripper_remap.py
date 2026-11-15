@@ -12,11 +12,24 @@ content, per type, and only a one-to-one match is accepted:
 * AnimatorController: name, with its parameter, layer and state names inside the original string table;
 * AnimatorOverrideController: name and number of clip overrides;
 * prefab: the full hierarchy (GameObject names, component classes in order, child order). The aligned
-  walk also pairs each AssetRipper file ID with the source path ID.
+  walk also pairs each AssetRipper file ID with the source path ID;
+* TextAsset: hash of the file bytes against the package's exported text, else a name unique among text assets;
+* ScriptableObject (a MonoBehaviour asset): name plus its serialized field names;
+* Mesh and AudioClip: a name unique among objects of that class (weakest evidence, reported as such).
 
 A matched asset whose source object lives in a serialized file named by its source asset GUID (layout
 verified by package GUID anchors) gets that GUID back; the export is copied with every reference
 rewritten. Anything ambiguous, unmatched or claimed twice keeps its AssetRipper GUID and is reported.
+
+With an Addressables catalog, a matched asset whose source object is the target of an AssetBundle container
+entry keyed by an asset GUID gets that GUID and the catalog's original path: the file and its .meta move to
+that path, keeping the exported extension (an original .fbx exported as a prefab stays a .prefab in the
+same folder). A path or GUID claimed by two exported assets is not applied to either and is reported.
+
+A build can hold several copies of one source asset (a player scene's `sharedassets` and an Addressables bundle).
+Their exports have identical content and therefore the same candidate set. When exactly one candidate of such a set
+has a catalog identity, the copies are merged: one export takes the original GUID and path, the others are dropped
+and every reference to them is rewritten to that GUID (kinds whose main object has a fixed file ID only).
 """
 
 from __future__ import annotations
@@ -28,11 +41,14 @@ import logging
 import re
 import shutil
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path, PurePosixPath
 
-from uare.blueprint import classify_scopes, guid_named_layout
+from uare.addressables import asset_paths as catalog_asset_paths
+from uare.atlas_split import AtlasSplitResult, split_atlas_sprites
+from uare.atlas_split import summarize as summarize_atlas
+from uare.blueprint import classify_scopes, container_keys, guid_named_layout
 from uare.errors import UareError
 from uare.game_model import GameModel, Json, ObjectRecord, Reference, load_model, non_finite, outgoing
 from uare.logs import event
@@ -58,11 +74,16 @@ class Match:
     path: str
     kind: str
     assetripper_guid: str
-    status: str  # matched | ambiguous | unmatched | conflict
+    status: str  # matched | ambiguous | unmatched | conflict | duplicate
     object_id: str | None
     original_guid: str | None
     evidence: str
     file_ids: dict[str, int]
+    # Project path the asset moves to (original folder and name, exported extension), from an Addressables catalog.
+    original_path: str | None = None
+    # Source objects with identical content (ambiguous matches), and the export a duplicate was merged into.
+    candidates: tuple[str, ...] = ()
+    merged_into: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +94,12 @@ class RemapResult:
     guids_restored: int
     guid_layout_verified: bool
     out_dir: str
+    paths_restored: int = 0
+    catalog_conflicts: int = 0
+    duplicates_merged: int = 0
+    scenes_restored: int = 0
+    guid_named_restored: int = 0
+    atlas_split: AtlasSplitResult | None = None
 
 
 # -- AssetRipper side ------------------------------------------------------------------------------
@@ -186,17 +213,16 @@ def near_pixels(left: Path, right: Path, tolerance: int = 2) -> bool:
 
     Texture decoders differ by rounding (measured: at most 1 per channel between AssetRipper and UnityPy).
     """
-    from PIL import Image
+    from PIL import Image, ImageChops
     with Image.open(left) as a, Image.open(right) as b:
         if a.size != b.size:
             return False
-        x, y = a.convert("RGBA").tobytes(), b.convert("RGBA").tobytes()
-    for offset in range(0, len(x), 4):
-        if x[offset + 3] == 0 and y[offset + 3] == 0:
-            continue
-        if any(abs(x[offset + c] - y[offset + c]) > tolerance for c in range(4)):
-            return False
-    return True
+        x, y = a.convert("RGBA"), b.convert("RGBA")
+    # Pixels transparent in both images are cleared in both, then the per-channel difference is checked in C.
+    both_clear = ImageChops.lighter(x.getchannel("A"), y.getchannel("A")).point(lambda v: 255 if v == 0 else 0)
+    blank = Image.new("RGBA", x.size, (0, 0, 0, 0))
+    x, y = Image.composite(blank, x, both_clear), Image.composite(blank, y, both_clear)
+    return all(high <= tolerance for _, high in ImageChops.difference(x, y).getextrema())
 
 
 def _bytes_hash(path: Path) -> str:
@@ -211,8 +237,10 @@ def assetripper_fingerprint(path: Path, kind: str) -> tuple[str, list[int]] | No
     """Fingerprint of one exported asset, comparable with `model_fingerprints`; None when it has no main object."""
     if kind == "Texture2D":
         return _pixels(path), []
-    if kind == "Font":
+    if kind in ("Font", "TextAsset"):
         return _bytes_hash(path), []
+    if kind == "AudioClip":
+        return json.dumps([path.stem]), []
     text = path.read_text(encoding="utf-8", errors="replace")
     if kind == "prefab":
         return prefab_tree(text)
@@ -241,7 +269,23 @@ def assetripper_fingerprint(path: Path, kind: str) -> tuple[str, list[int]] | No
         return json.dumps([name, sorted(n for n in names if n)]), []
     if kind == "AnimatorOverrideController":
         return json.dumps([name, len(re.findall(r"m_OriginalClip:", body))]), []
+    if kind == "ScriptableObject":
+        return json.dumps([name, _field_names(body)]), []
+    if kind == "Mesh":
+        return json.dumps([name]), []
     raise RemapError(f"No fingerprint for AssetRipper asset kind {kind}")
+
+
+def _field_names(body: str) -> list[str]:
+    """Serialized field names of a MonoBehaviour document, without Unity's own `m_` fields."""
+    return sorted({m[1] for m in re.finditer(r"^  ([A-Za-z_][\w]*):", body, re.M) if not m[1].startswith("m_")})
+
+
+def _first_class(path: Path) -> int | None:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        head = handle.read(4096)
+    match = _DOC.search(head)
+    return int(match[1]) if match else None
 
 
 def exported_assets(project: Path) -> Iterator[tuple[Path, str, str]]:
@@ -258,8 +302,15 @@ def exported_assets(project: Path) -> Iterator[tuple[Path, str, str]]:
         if guid_match is None:
             continue
         kind = suffixes.get(path.suffix)
-        if kind is None and path.suffix.lower() == ".png" and "TextureImporter:" in meta.read_text(errors="replace"):
-            kind = "Texture2D"
+        suffix = path.suffix.lower()
+        if kind is None and suffix in (".png", ".bytes", ".txt", ".json", ".xml", ".csv", ".ogg", ".wav", ".mp3"):
+            importer = meta.read_text(errors="replace")
+            kind = ("Texture2D" if suffix == ".png" and "TextureImporter:" in importer else
+                    "TextAsset" if "TextScriptImporter:" in importer else
+                    "AudioClip" if "AudioImporter:" in importer else None)
+        elif kind is None and suffix == ".asset":
+            cls = _first_class(path)
+            kind = "Mesh" if cls == 43 else "ScriptableObject" if cls == 114 else None
         if kind is not None:
             yield path, kind, guid_match[1]
 
@@ -305,7 +356,23 @@ def model_fingerprints(model: GameModel, assets_dir: Path, kinds: set[str]) -> d
     prints: dict[str, dict[str, list[tuple[str, list[str]]]]] = defaultdict(lambda: defaultdict(list))
     for obj in model.objects:
         kind, data = obj.class_name, obj.data
+        if kind == "MonoBehaviour" and "ScriptableObject" in kinds:
+            kind = "ScriptableObject"
         if kind not in kinds:
+            continue
+        if kind == "ScriptableObject":
+            ref = next((r for r in edges.get(obj.id, ()) if r.field == "m_GameObject"), None)
+            if obj.class_name != "MonoBehaviour" or (ref is not None and ref.status != "null"):
+                continue
+            prints["ScriptableObject"][json.dumps([obj.name, sorted(k for k in data if not k.startswith("m_"))])].append((obj.id, []))
+            continue
+        if kind in ("Mesh", "AudioClip"):
+            prints[kind][json.dumps([obj.name])].append((obj.id, []))
+            continue
+        if kind == "TextAsset":
+            if obj.output and (assets_dir / obj.output).is_file():
+                prints[kind][_bytes_hash(assets_dir / obj.output)].append((obj.id, []))
+            prints["TextAsset-name"][obj.name].append((obj.id, []))
             continue
         if kind in ("Texture2D", "Font"):
             if not obj.output or not (assets_dir / obj.output).is_file():
@@ -378,12 +445,25 @@ def match_export(project: Path, model: GameModel, assets_dir: Path,
             candidates = prints[kind].get(key, [])
             evidence = {"Texture2D": "decoded pixel hash", "Font": "font file hash", "prefab": "hierarchy fingerprint",
                         "Material": "name and saved float/color properties", "AnimationClip": "name, sample rate, stop time, events",
-                        "AnimatorOverrideController": "name and clip override count"}[kind]
+                        "AnimatorOverrideController": "name and clip override count", "TextAsset": "file byte hash",
+                        "ScriptableObject": "name and serialized field names", "Mesh": "unique name only",
+                        "AudioClip": "unique name only"}[kind]
+        if kind == "TextAsset" and not candidates:
+            candidates, evidence = prints["TextAsset-name"].get(path.stem, []), "unique name only (bytes differ)"
         if kind == "Texture2D" and not candidates:
-            near = [c for c in prints["Texture2D-size"].get(_size(path), [])
-                    if near_pixels(path, assets_dir / str(by_id[c[0]].output))]
+            # Same-named textures of that size are compared first; the whole size class only when none matches,
+            # because decoding every same-size texture for each export is quadratic on large builds.
+            same_size = prints["Texture2D-size"].get(_size(path), [])
+            names = {path.stem, re.sub(r"[ _]\d+$", "", path.stem)}
+            named = [c for c in same_size if by_id[c[0]].name in names]
+            near = [c for c in named if near_pixels(path, assets_dir / str(by_id[c[0]].output))]
+            scope = "same-named textures"
+            if not near:
+                near = [c for c in same_size if c not in named and near_pixels(path, assets_dir / str(by_id[c[0]].output))]
+                scope = "all textures of that size"
             if near:
-                candidates, evidence = near, "decoded pixels within 2 per channel (decoder rounding), transparent RGB ignored"
+                candidates = near
+                evidence = f"decoded pixels within 2 per channel (decoder rounding), transparent RGB ignored; among {scope}"
         if len(candidates) > 1:
             # Identical content in several source objects: only a single same-named candidate is accepted.
             stem = path.stem
@@ -401,7 +481,8 @@ def match_export(project: Path, model: GameModel, assets_dir: Path,
         rel = path.relative_to(project).as_posix()
         if len(candidates) != 1:
             status = "unmatched" if not candidates else "ambiguous"
-            results.append(Match(rel, kind, guid, status, None, None, f"{evidence}; {len(candidates)} candidates", {}))
+            results.append(Match(rel, kind, guid, status, None, None, f"{evidence}; {len(candidates)} candidates", {},
+                                 candidates=tuple(sorted(c[0] for c in candidates))))
         elif claims[candidates[0][0]] > 1:
             results.append(Match(rel, kind, guid, "conflict", candidates[0][0], None, f"{evidence}; claimed twice", {}))
         else:
@@ -421,6 +502,186 @@ def match_export(project: Path, model: GameModel, assets_dir: Path,
     return results
 
 
+def catalog_identities(model: GameModel, paths: Mapping[str, str]) -> dict[str, tuple[str, str]]:
+    """Object id -> (asset GUID, original path) for container targets keyed by a GUID the catalog names.
+
+    An object named by several catalog GUIDs is left out.
+    """
+    found: dict[str, set[str]] = defaultdict(set)
+    for oid, keys in container_keys(model, outgoing(model)).items():
+        found[oid].update(key for key in keys if key in paths)
+    return {oid: (guid, paths[guid]) for oid, guids in found.items() if len(guids) == 1 for guid in guids}
+
+
+def apply_catalog(matches: list[Match], identities: Mapping[str, tuple[str, str]],
+                  project_files: set[str]) -> tuple[list[Match], int]:
+    """Give matched assets their catalog GUID and original path; returns the updated matches and the conflict count.
+
+    The target keeps the exported extension. Several exports of one catalog asset are the sub-assets of one source
+    file (a model's prefab, meshes and clips): the single prefab among them takes the GUID and path, the others move
+    into a folder named after the source file next to it and keep their own GUIDs. A path proposed twice, a target
+    that is another exported file staying in place, or a GUID that disagrees with one restored by layout is applied
+    to none of them.
+    """
+    proposals: dict[int, tuple[str, str]] = {}
+    for index, match in enumerate(matches):
+        if match.status != "matched" or match.object_id not in identities:
+            continue
+        guid, original = identities[match.object_id]
+        if not original.startswith("Assets/") or ".." in original or (match.original_guid and match.original_guid != guid):
+            continue
+        proposals[index] = (guid, original)
+    by_guid: dict[str, list[int]] = defaultdict(list)
+    for index, (guid, _) in proposals.items():
+        by_guid[guid].append(index)
+    targets: dict[int, tuple[str | None, str, str]] = {}  # GUID or None, target path, evidence
+    for guid, indexes in by_guid.items():
+        original = PurePosixPath(proposals[indexes[0]][1])
+        if len(indexes) == 1:
+            index = indexes[0]
+            targets[index] = (guid, str(original.with_suffix(PurePosixPath(matches[index].path).suffix)),
+                              "GUID and path from Addressables catalog")
+            continue
+        mains = [i for i in indexes if matches[i].kind == "prefab"]
+        main = mains[0] if len(mains) == 1 else None
+        folder = original.with_suffix("")
+        for index in indexes:
+            if index == main:
+                targets[index] = (guid, str(original.with_suffix(".prefab")),
+                                  f"GUID and path from Addressables catalog; main object of {len(indexes)} sub-assets")
+            else:
+                targets[index] = (None, f"{folder}/{PurePosixPath(matches[index].path).name}",
+                                  f"sub-asset of catalog asset {original.name}; folder from the catalog path, own GUID kept")
+    moved_from = {matches[i].path.casefold() for i in targets}
+    staying = {path.casefold() for path in project_files} - moved_from
+    path_count = Counter(target.casefold() for _, target, _ in targets.values())
+    updated = list(matches)
+    conflicts = 0
+    for index, (guid, target, evidence) in targets.items():
+        match = matches[index]
+        if path_count[target.casefold()] > 1 or target.casefold() in staying:
+            conflicts += 1
+            updated[index] = replace(match, evidence=match.evidence + "; catalog path claimed twice, not applied")
+            continue
+        updated[index] = replace(match, original_guid=guid or match.original_guid, original_path=target,
+                                 evidence=f"{match.evidence}; {evidence}")
+    return updated, conflicts
+
+
+def catalog_scene_moves(project: Path, paths: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Moves and GUIDs for exports AssetRipper names by their asset GUID (`<guid>.unity`, `<guid>.shader`, ...).
+
+    When a bundle's container key is a GUID and AssetRipper cannot name the asset otherwise (streamed scenes, shaders),
+    the file name is that GUID. Returns (project-relative path -> original path with the exported extension,
+    AssetRipper GUID -> asset GUID) for every such file the catalog names; a scene's companion folder (lighting data)
+    moves next to it.
+    """
+    moves: dict[str, str] = {}
+    guids: dict[str, str] = {}
+    assets = project / "Assets"
+    for item in sorted(assets.rglob("*")):
+        guid = item.stem
+        if not item.is_file() or item.suffix == ".meta" or not _GUID_FILE.fullmatch(guid):
+            continue
+        original = paths.get(guid, "")
+        if not original.startswith("Assets/") or ".." in original or (item.suffix == ".unity") != original.endswith(".unity"):
+            continue
+        moves[item.relative_to(project).as_posix()] = str(PurePosixPath(original).with_suffix(item.suffix))
+        meta = item.with_name(item.name + ".meta")
+        own = _GUID_REF.search(meta.read_text(encoding="utf-8", errors="replace")) if meta.is_file() else None
+        if own:
+            guids[own[1]] = guid
+        companion = item.with_name(guid)
+        if item.suffix == ".unity" and companion.is_dir():
+            target = str(PurePosixPath(original).with_suffix(""))
+            moves[companion.relative_to(project).as_posix()] = target
+            for part in companion.rglob("*"):
+                if part.is_file() and part.suffix != ".meta":
+                    moves[part.relative_to(project).as_posix()] = target + "/" + part.relative_to(companion).as_posix()
+    return moves, guids
+
+
+# AssetRipper's per-class folders and file suffixes, for exports that no evidence places at an original path.
+UNMAPPED_ROOT = "Assets/_Unmapped/AssetRipper"
+_KEEP_ROOTS = frozenset({"Plugins", "Scripts", "Resources", "Scene"})
+_SUFFIX_FOLDERS = {".prefab": "Prefab", ".mat": "Material", ".anim": "AnimationClip", ".controller": "AnimatorController",
+                   ".overrideController": "AnimatorController", ".png": "Texture2D", ".asset": "Asset", ".bytes": "TextAsset",
+                   ".txt": "TextAsset", ".json": "TextAsset", ".shader": "Shader", ".ogg": "AudioClip", ".wav": "AudioClip",
+                   ".unity": "Scene", ".mixer": "AudioMixerController", ".playable": "Playable"}
+
+
+def unmapped_moves(project_files: set[str], moves: Mapping[str, str], original_roots: set[str]) -> dict[str, str]:
+    """Moves for exports left where AssetRipper put them: files at the root of Assets/ and AssetRipper's type
+    folders go under UNMAPPED_ROOT, so the project root shows only original folders. Code, Resources, player scenes
+    and folders that hold catalog-placed assets stay."""
+    targets: dict[str, str] = {}
+    taken = {t.casefold() for t in moves.values()}
+    for rel in sorted(project_files):
+        if rel in moves or rel.endswith(".meta"):
+            continue
+        parts = rel.split("/")
+        if len(parts) < 2 or parts[0] != "Assets":
+            continue
+        if len(parts) == 2:
+            folder = _SUFFIX_FOLDERS.get(PurePosixPath(rel).suffix, "Other")
+            target = f"{UNMAPPED_ROOT}/{folder}/{parts[1]}"
+        elif parts[1] in _KEEP_ROOTS or parts[1] in original_roots or parts[1].startswith("_"):
+            continue
+        else:
+            target = f"{UNMAPPED_ROOT}/{'/'.join(parts[1:])}"
+            # The folder itself (its .meta) moves with its files.
+            targets.setdefault(f"Assets/{parts[1]}", f"{UNMAPPED_ROOT}/{parts[1]}")
+        stem, suffix, counter = target[:-len(PurePosixPath(target).suffix) or None], PurePosixPath(target).suffix, 1
+        while target.casefold() in taken:
+            target = f"{stem}_{counter}{suffix}"
+            counter += 1
+        taken.add(target.casefold())
+        targets[rel] = target
+    return targets
+
+
+# Kinds whose exported main object always has the same file ID, so one GUID can stand for any copy.
+_MERGEABLE = frozenset({"Texture2D", "Material", "Font", "TextAsset", "AudioClip", "AnimationClip", "AnimatorController"})
+
+
+def merge_catalog_duplicates(matches: list[Match], identities: Mapping[str, tuple[str, str]]) -> list[Match]:
+    """Resolve exports whose content is identical in several source objects.
+
+    One catalog candidate: the first export (by path) becomes `matched` to it and the others become `duplicate` of it
+    (mergeable kinds only). Several catalog candidates: exports and catalog candidates are paired in sorted order
+    (export path, catalog path), since every pair has identical content; extra exports of a mergeable kind become
+    duplicates of the first pair, others stay ambiguous. Candidate sets without a catalog identity stay ambiguous.
+    Pairing places correct content at every catalog path, but a reference may point at an identical copy at another
+    path; the evidence says so.
+    """
+    groups: dict[tuple[str, tuple[str, ...]], list[int]] = defaultdict(list)
+    for index, match in enumerate(matches):
+        if match.status == "ambiguous" and match.candidates:
+            groups[match.kind, match.candidates].append(index)
+    updated = list(matches)
+    for (kind, candidates), indexes in groups.items():
+        known = sorted((c for c in candidates if c in identities), key=lambda c: identities[c][1])
+        if not known or (len(known) == 1 and kind not in _MERGEABLE):
+            continue
+        indexes.sort(key=lambda i: matches[i].path)
+        if len(known) == 1:
+            note = f"identical content in {len(candidates)} source objects; the catalog names one; {len(indexes)} exports merged"
+        else:
+            note = (f"identical content in {len(candidates)} source objects, {len(known)} named by the catalog; paired in "
+                    f"sorted order, so a reference may resolve to an identical copy at another catalog path")
+        pairs = list(zip(indexes, known))
+        for index, candidate in pairs:
+            updated[index] = replace(matches[index], status="matched", object_id=candidate,
+                                     evidence=f"{matches[index].evidence}; {note}")
+        if kind not in _MERGEABLE:
+            continue
+        first = matches[pairs[0][0]]
+        for index in indexes[len(pairs):]:
+            updated[index] = replace(matches[index], status="duplicate", object_id=pairs[0][1], merged_into=first.path,
+                                     evidence=f"{matches[index].evidence}; {note}")
+    return updated
+
+
 # Objects a source asset file may hold besides its main object: a texture's sprites, a font's atlas and material.
 _SUB_OBJECTS = {"Texture2D": {"Sprite"}, "Font": {"Texture2D", "Material"}}
 
@@ -436,8 +697,12 @@ def _sole_asset(obj: ObjectRecord, kind: str, structure: set[str], siblings: lis
     return all(s.id == obj.id or s.class_name in allowed for s in siblings)
 
 
-def rewrite_project(project: Path, target: Path, guids: dict[str, str]) -> None:
+def rewrite_project(project: Path, target: Path, guids: dict[str, str], moves: Mapping[str, str] | None = None,
+                    skip: frozenset[str] = frozenset()) -> None:
     """Copy `project` to `target`, replacing AssetRipper GUIDs by original ones in every non-binary file.
+
+    `moves` maps an asset's project-relative path to its new one; its .meta moves with it. Assets in `skip`
+    (merged duplicates) are not copied, nor are their .meta files.
 
     Files are copied, never linked, so editing the copy cannot change the AssetRipper export. Text is
     rewritten as bytes: no size limit, line endings and encoding stay as they are.
@@ -448,9 +713,14 @@ def rewrite_project(project: Path, target: Path, guids: dict[str, str]) -> None:
         rel = path.relative_to(project)
         if path.is_symlink():
             raise RemapError(f"AssetRipper export contains a symlink; refusing to follow it; path={rel}")
-        out = target / rel
+        key = rel.as_posix()
+        if (key[:-len(".meta")] if key.endswith(".meta") else key) in skip:
+            continue
+        moved = (moves or {}).get(key[:-len(".meta")] if key.endswith(".meta") else key)
+        out = target / (moved + ".meta" if moved and key.endswith(".meta") else moved) if moved else target / rel
         if path.is_dir():
-            out.mkdir(parents=True, exist_ok=True)
+            if not moved:  # a moved folder's files recreate it at the target; the old path must not stay behind
+                out.mkdir(parents=True, exist_ok=True)
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         data = path.read_bytes()
@@ -465,8 +735,13 @@ def rewrite_project(project: Path, target: Path, guids: dict[str, str]) -> None:
         shutil.copystat(path, out)
 
 
-def remap(export_dir: Path, assets_dir: Path, out_dir: Path) -> RemapResult:
-    """Match `export_dir` (from `uare assetripper`) to the package model and write a GUID-restored copy."""
+def remap(export_dir: Path, assets_dir: Path, out_dir: Path, addressables_catalog: Path | None = None,
+          split_atlases: bool = False) -> RemapResult:
+    """Match `export_dir` (from `uare assetripper`) to the package model and write a GUID-restored copy.
+
+    With `addressables_catalog`, matched assets and GUID-named files (scenes, shaders) also take their original GUID and project path
+    from the catalog. With `split_atlases`, SpriteAtlas pages of the copy become one PNG per sprite.
+    """
     project = export_dir / "export" / "ExportedProject"
     if not (project / "Assets").is_dir():
         raise RemapError(f"Not an AssetRipper export from `uare assetripper`; missing {project / 'Assets'}")
@@ -474,17 +749,53 @@ def remap(export_dir: Path, assets_dir: Path, out_dir: Path) -> RemapResult:
         # UnityPy names component classes and Pillow decodes pixels; without them every match would fail silently.
         if importlib.util.find_spec(module) is None:
             raise RemapError(f"assetripper-remap needs {module}; install the project's `power` extra")
+    catalog = catalog_asset_paths(addressables_catalog) if addressables_catalog else None
     model = load_model(assets_dir / "game_model.json")
     matches = match_export(project, model, assets_dir)
+    conflicts = 0
+    if catalog:
+        files = {p.relative_to(project).as_posix() for p in project.rglob("*") if p.is_file()}
+        identities = catalog_identities(model, catalog.paths)
+        matches, conflicts = apply_catalog(merge_catalog_duplicates(matches, identities), identities, files)
+        # A duplicate follows its merged export: same GUID when that export took one, otherwise it stays as it is.
+        primary = {m.path: m for m in matches}
+        matches = [replace(m, original_guid=primary[m.merged_into].original_guid)
+                   if m.status == "duplicate" and m.merged_into and primary[m.merged_into].original_guid
+                   else (replace(m, status="ambiguous", merged_into=None) if m.status == "duplicate" else m)
+                   for m in matches]
     guids = {m.assetripper_guid: m.original_guid for m in matches if m.original_guid}
+    skip = frozenset(m.path for m in matches if m.status == "duplicate")
+    moves = {m.path: m.original_path for m in matches if m.original_path}
+    scene_moves: dict[str, str] = {}
+    if catalog:
+        scene_moves, scene_guids = catalog_scene_moves(project, catalog.paths)
+        taken = {target.casefold() for target in moves.values()}
+        scene_moves = {k: v for k, v in scene_moves.items() if k not in moves and v.casefold() not in taken}
+        scene_guids = {k: v for k, v in scene_guids.items() if k not in guids and v not in guids.values()}
+        clashes = set(scene_guids.values()) & set(guids.values())
+        if clashes:
+            raise RemapError(f"A scene GUID from the catalog is also restored for another asset; guids={sorted(clashes)[:3]}")
+        guids.update(scene_guids)
+        moves.update(scene_moves)
+        roots = {p.split("/")[1] for p in catalog.paths.values() if p.count("/") >= 2}
+        files_now = {p.relative_to(project).as_posix() for p in project.rglob("*") if p.is_file()}
+        moves.update(unmapped_moves(files_now - skip, moves, roots))
     with staged_output(out_dir) as staging:
-        rewrite_project(project, staging / "project", guids)
+        rewrite_project(project, staging / "project", guids, moves, skip)
+        split = split_atlas_sprites(staging / "project", catalog.paths if catalog else None) if split_atlases else None
         (staging / "mapping.json").write_text(json.dumps([asdict(m) for m in matches], indent=1) + "\n", encoding="utf-8")
         by_kind: dict[str, Counter[str]] = defaultdict(Counter)
         for m in matches:
             by_kind[m.kind][m.status] += 1
         result = RemapResult(len(matches), dict(Counter(m.status for m in matches)),
-                             {k: dict(v) for k, v in sorted(by_kind.items())}, len(guids), guid_named_layout(model), str(out_dir))
+                             {k: dict(v) for k, v in sorted(by_kind.items())}, len(guids), guid_named_layout(model), str(out_dir),
+                             paths_restored=sum(1 for m in matches if m.original_path), catalog_conflicts=conflicts,
+                             duplicates_merged=len(skip),
+                             scenes_restored=sum(target.endswith(".unity") for target in scene_moves.values()),
+                             guid_named_restored=sum(1 for source, target in scene_moves.items()
+                                                     if not target.endswith(".unity")
+                                                     and _GUID_FILE.fullmatch(PurePosixPath(source).stem)),
+                             atlas_split=split)
         (staging / "report.json").write_text(json.dumps(asdict(result), indent=2) + "\n", encoding="utf-8")
     event(LOG, logging.INFO, "assetripper_remapped", assets=result.assets, restored=result.guids_restored)
     return result
@@ -493,6 +804,11 @@ def remap(export_dir: Path, assets_dir: Path, out_dir: Path) -> RemapResult:
 def summarize(result: RemapResult) -> list[str]:
     return [f"exported assets   : {result.assets} ({', '.join(f'{k}={v}' for k, v in sorted(result.by_status.items()))})",
             *(f"  {kind:26}: {', '.join(f'{k}={v}' for k, v in sorted(counts.items()))}" for kind, counts in result.by_kind.items()),
-            f"guid layout       : {'verified' if result.guid_layout_verified else 'not verified (no GUIDs restored)'}",
+            f"guid layout       : {'verified' if result.guid_layout_verified else 'not verified (no GUIDs restored from file names)'}",
             f"original GUIDs    : {result.guids_restored} restored",
+            f"original paths    : {result.paths_restored} restored from the catalog, {result.catalog_conflicts} conflicts",
+            f"catalog scenes    : {result.scenes_restored} moved to their original path",
+            f"GUID-named files  : {result.guid_named_restored} (shaders and others) moved to their catalog path",
+            f"merged duplicates : {result.duplicates_merged} identical copies dropped in favour of the catalog asset",
+            *(summarize_atlas(result.atlas_split) if result.atlas_split else []),
             f"output            : {result.out_dir}/project (remapped copy), mapping.json, report.json"]

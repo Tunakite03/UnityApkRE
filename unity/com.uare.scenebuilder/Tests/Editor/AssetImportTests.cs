@@ -183,7 +183,7 @@ namespace Uare.SceneBuilder.Editor.Tests
             File.WriteAllText(Path.Combine(_sourceRoot, "shared", "Broken.png"), "not an image");
             var spec = new SceneSpec
             {
-                schema = "uare.scene-spec", version = 4, scene = "UareRollbackProbe", scopeId = "test", originalPath = "", source = "", serializedFile = "",
+                schema = "uare.scene-spec", version = 5, scene = "UareRollbackProbe", scopeId = "test", originalPath = "", source = "", serializedFile = "",
                 sourceRoot = _sourceRoot, rootOrderBasis = "path_id", tags = Array.Empty<string>(), layers = Array.Empty<string>(),
                 sortingLayers = SortingLayer.layers.Select(layer => new SortingLayerSpec { name = layer.name, uniqueId = (uint)layer.id }).ToArray(),
                 gameObjects = Array.Empty<GameObjectSpec>(), sceneSettings = Array.Empty<SceneSettingSpec>(),

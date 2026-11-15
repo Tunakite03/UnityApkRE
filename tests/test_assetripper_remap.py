@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from uare.assetripper_remap import (_sole_asset, assetripper_fingerprint, documents, match_export, near_pixels,
-                                    prefab_tree, rewrite_project, scalar)
+from uare.assetripper_remap import (Match, _sole_asset, apply_catalog, merge_catalog_duplicates, unmapped_moves, assetripper_fingerprint, catalog_identities,
+                                    documents, match_export, near_pixels, prefab_tree, rewrite_project, scalar)
 from uare.game_model import FileRecord, Json, ObjectRecord, identity, resolve
 
 PREFAB = """%YAML 1.1
@@ -192,6 +192,120 @@ class RemapTests(unittest.TestCase):
                                 "copies, not links: editing the copy must not reach the export")
             self.assertEqual((target / "Assets" / "image.png").read_bytes(), b"\x89PNG\0binary")
             self.assertIn("a" * 32, (project / "Assets" / "Scene.unity").read_text(), "the source export must stay untouched")
+
+    def test_catalog_identities_follow_guid_container_keys(self) -> None:
+        guid = "c" * 32
+        objects = (obj("CAB", 1, "AssetBundle", {"m_Container": [[guid, {"asset": ptr(2)}], ["other", {"asset": ptr(3)}]]}),
+                   obj("CAB", 2, "AnimationClip", {"m_Name": "Open"}), obj("CAB", 3, "Material", {"m_Name": "M"}))
+        found = catalog_identities(resolve((FileRecord("Data/CAB", "CAB", ()),), objects, ()),
+                                   {guid: "Assets/_Art/Anim/Open.anim"})
+        self.assertEqual(found, {objects[1].id: (guid, "Assets/_Art/Anim/Open.anim")})
+
+    def test_catalog_paths_keep_the_exported_extension_and_skip_conflicts(self) -> None:
+        def match(path: str, oid: str) -> Match:
+            return Match(path, "prefab", "a" * 32, "matched", oid, None, "hierarchy fingerprint", {})
+        matches = [match("Assets/Prefabs/Hero.prefab", "hero"), match("Assets/Prefabs/A.prefab", "a"),
+                   match("Assets/Prefabs/B.prefab", "b"), match("Assets/Prefabs/C.prefab", "c")]
+        identities = {"hero": ("1" * 32, "Assets/_Art/Roles/Hero.FBX"), "a": ("2" * 32, "Assets/_Art/X.prefab"),
+                      "b": ("3" * 32, "Assets/_Art/X.prefab"), "c": ("4" * 32, "Assets/Keep/Stay.prefab")}
+        files = {m.path for m in matches} | {"Assets/Keep/Stay.prefab"}
+        updated, conflicts = apply_catalog(matches, identities, files)
+        self.assertEqual((updated[0].original_path, updated[0].original_guid), ("Assets/_Art/Roles/Hero.prefab", "1" * 32))
+        self.assertEqual([m.original_path for m in updated[1:]], [None, None, None])
+        self.assertEqual(conflicts, 3)
+
+    def test_model_sub_assets_follow_their_main_prefab(self) -> None:
+        def match(path: str, kind: str, oid: str) -> Match:
+            return Match(path, kind, "a" * 32, "matched", oid, None, "evidence", {})
+        matches = [match("Assets/PrefabInstance/Snake.prefab", "prefab", "go"),
+                   match("Assets/Mesh/Snake_Body.asset", "Mesh", "mesh"),
+                   match("Assets/AnimationClip/Die.anim", "AnimationClip", "clip")]
+        source = ("5" * 32, "Assets/_Art/Monster/Snake/Snake@Die.FBX")
+        updated, conflicts = apply_catalog(matches, {"go": source, "mesh": source, "clip": source}, {m.path for m in matches})
+        self.assertEqual(conflicts, 0)
+        self.assertEqual((updated[0].original_path, updated[0].original_guid), ("Assets/_Art/Monster/Snake/Snake@Die.prefab", "5" * 32))
+        self.assertEqual((updated[1].original_path, updated[1].original_guid), ("Assets/_Art/Monster/Snake/Snake@Die/Snake_Body.asset", None))
+        self.assertEqual(updated[2].original_path, "Assets/_Art/Monster/Snake/Snake@Die/Die.anim")
+
+    def test_rewrite_moves_an_asset_with_its_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = export(Path(tmp))
+            target = Path(tmp) / "out"
+            rewrite_project(project, target, {"a" * 32: "1" * 32},
+                            {"Assets/Prefabs/Fx_Hit01.prefab": "Assets/_Resources/Effect/Fx_Hit01.prefab"})
+            moved = target / "Assets" / "_Resources" / "Effect"
+            self.assertTrue((moved / "Fx_Hit01.prefab").is_file())
+            self.assertIn("guid: " + "1" * 32, (moved / "Fx_Hit01.prefab.meta").read_text())
+            self.assertFalse((target / "Assets" / "Prefabs" / "Fx_Hit01.prefab").exists())
+            self.assertIn("1" * 32, (target / "Assets" / "Scene.unity").read_text(), "references follow the GUID, not the path")
+
+    def test_text_assets_and_scriptable_objects_are_matched(self) -> None:
+        so = obj("CAB", 1, "MonoBehaviour", {"m_Name": "MapData001", "m_GameObject": ptr(0), "m_Script": ptr(9),
+                                             "width": 3, "tiles": []})
+        text = ObjectRecord(identity("Data/CAB", "CAB", 2), "Data/CAB", "CAB", 2, "TextAsset", "Chapter", {"m_Name": "Chapter"},
+                            "complete", (), "shared/textassets/Chapter.bytes")
+        game = resolve((FileRecord("Data/CAB", "CAB", ()),), (so, text), ())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "shared" / "textassets").mkdir(parents=True)
+            (root / "shared" / "textassets" / "Chapter.bytes").write_bytes(b"\x01\x02config")
+            project = root / "ExportedProject"
+            assets = project / "Assets"
+            assets.mkdir(parents=True)
+            (assets / "Chapter.bytes").write_bytes(b"\x01\x02config")
+            (assets / "Chapter.bytes.meta").write_text("guid: " + "1" * 32 + "\nTextScriptImporter:\n")
+            (assets / "MapData001.asset").write_text("%YAML 1.1\n--- !u!114 &11400000\nMonoBehaviour:\n  m_GameObject: {fileID: 0}\n"
+                                                     "  m_Name: MapData001\n  width: 3\n  tiles: []\n")
+            (assets / "MapData001.asset.meta").write_text("guid: " + "2" * 32 + "\n")
+            matches = {m.path: m for m in match_export(project, game, root)}
+        self.assertEqual((matches["Assets/Chapter.bytes"].status, matches["Assets/Chapter.bytes"].object_id), ("matched", text.id))
+        self.assertEqual((matches["Assets/MapData001.asset"].status, matches["Assets/MapData001.asset"].object_id), ("matched", so.id))
+
+    def test_identical_copies_of_a_catalog_asset_are_merged(self) -> None:
+        def ambiguous(path: str, guid: str, candidates: tuple[str, ...], kind: str = "Texture2D") -> Match:
+            return Match(path, kind, guid, "ambiguous", None, None, "decoded pixel hash; 2 candidates", {}, candidates=candidates)
+        matches = [ambiguous("Assets/Texture2D/Glow_011.png", "1" * 32, ("bundle", "shared")),
+                   ambiguous("Assets/Texture2D/Glow_011_0.png", "2" * 32, ("bundle", "shared")),
+                   ambiguous("Assets/Texture2D/Other.png", "3" * 32, ("x", "y")),
+                   ambiguous("Assets/Prefab/P.prefab", "4" * 32, ("bundle", "shared"), kind="prefab")]
+        merged = merge_catalog_duplicates(matches, {"bundle": ("9" * 32, "Assets/_Art/PublicFX/Textures/Glow_011.png")})
+        self.assertEqual((merged[0].status, merged[0].object_id), ("matched", "bundle"))
+        self.assertEqual((merged[1].status, merged[1].merged_into), ("duplicate", "Assets/Texture2D/Glow_011.png"))
+        self.assertEqual(merged[2].status, "ambiguous", "no candidate has a catalog identity")
+        self.assertEqual(merged[3].status, "ambiguous", "prefab file IDs differ between copies; never merged")
+
+    def test_identical_exports_pair_with_several_catalog_paths(self) -> None:
+        def ambiguous(path: str, kind: str = "AnimationClip") -> Match:
+            return Match(path, kind, path[-1] * 32, "ambiguous", None, None, "clip print; 3 candidates", {},
+                         candidates=("a", "b", "c"))
+        matches = [ambiguous("Assets/AnimationClip/Idle_2"), ambiguous("Assets/AnimationClip/Idle_1"),
+                   ambiguous("Assets/AnimationClip/Idle_3")]
+        identities = {"a": ("1" * 32, "Assets/_Art/B/Idle.anim"), "b": ("2" * 32, "Assets/_Art/A/Idle.anim")}
+        merged = merge_catalog_duplicates(matches, identities)
+        by_path = {m.path: m for m in merged}
+        self.assertEqual(by_path["Assets/AnimationClip/Idle_1"].object_id, "b", "first export takes the first catalog path")
+        self.assertEqual(by_path["Assets/AnimationClip/Idle_2"].object_id, "a")
+        self.assertEqual((by_path["Assets/AnimationClip/Idle_3"].status, by_path["Assets/AnimationClip/Idle_3"].merged_into),
+                         ("duplicate", "Assets/AnimationClip/Idle_1"))
+        self.assertIn("paired in sorted order", by_path["Assets/AnimationClip/Idle_1"].evidence)
+
+    def test_rewrite_skips_merged_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = export(Path(tmp))
+            target = Path(tmp) / "out"
+            rewrite_project(project, target, {"b" * 32: GUID_FILE}, skip=frozenset({"Assets/AnimationClip/Open.anim"}))
+            self.assertFalse((target / "Assets" / "AnimationClip" / "Open.anim").exists())
+            self.assertFalse((target / "Assets" / "AnimationClip" / "Open.anim.meta").exists())
+
+    def test_unplaced_exports_leave_the_project_root(self) -> None:
+        files = {"Assets/Hero.prefab", "Assets/Material/Glow.mat", "Assets/Plugins/Game.dll", "Assets/_Art/X.png",
+                 "Assets/Scene/Main.unity", "Assets/Art/Y.png", "Assets/Done.anim"}
+        moves = unmapped_moves(files, {"Assets/Done.anim": "Assets/_Art/Done.anim"}, {"Art", "_Art"})
+        self.assertEqual(moves["Assets/Hero.prefab"], "Assets/_Unmapped/AssetRipper/Prefab/Hero.prefab")
+        self.assertEqual(moves["Assets/Material/Glow.mat"], "Assets/_Unmapped/AssetRipper/Material/Glow.mat")
+        self.assertEqual(moves["Assets/Material"], "Assets/_Unmapped/AssetRipper/Material")
+        for kept in ("Assets/Plugins/Game.dll", "Assets/_Art/X.png", "Assets/Scene/Main.unity", "Assets/Art/Y.png", "Assets/Done.anim"):
+            self.assertNotIn(kept, moves)
 
 
 if __name__ == "__main__":

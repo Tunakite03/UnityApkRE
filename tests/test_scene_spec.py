@@ -172,7 +172,7 @@ class SceneSpecTests(unittest.TestCase):
         material = assets["shared/materials/scenes/HeroMat.json"]
         self.assertEqual((material["kind"], material["importPath"], material["shaderName"]),
                          ("material", "shared/materials/scenes/HeroMat.mat", "Sprites/Default"))
-        self.assertEqual(material["textures"], [{"name": "_MainTex", "path": "shared/textures/scenes/atlas.png", "missing": "",
+        self.assertEqual(material["textures"], [{"name": "_MainTex", "path": "shared/textures/scenes/atlas.png", "missing": "", "builtin": "",
                                                  "scaleX": 1.0, "scaleY": 1.0, "offsetX": 0.0, "offsetY": 0.0}])
         self.assertEqual(material["colors"], [{"name": "_Color", "r": 0.5, "g": 1.0, "b": 1.0, "a": 0.25}])
         self.assertEqual((material["floats"], material["keywords"], material["renderQueue"]),
@@ -272,9 +272,50 @@ class SceneSpecTests(unittest.TestCase):
         # The recorded path keeps its folder and name; the extension follows the exported file.
         self.assertEqual((texture["projectPath"], texture["originalPath"]), ("Assets/Art/atlas.png", "Assets/Art/atlas.psd"))
         self.assertEqual(assets["shared/sprites/scenes/hero.png"]["projectPath"], "")
-        self.assertEqual(spec["version"], 4)
+        self.assertEqual(spec["version"], 5)
         self.assertEqual(spec["scenePath"], "Assets/Scenes/Main.unity")
         self.assertEqual((result.placed_at_original, result.original_conflicts), (2, 0))
+
+    def test_copy_without_a_path_shares_the_recorded_path_of_its_identical_asset_across_scenes(self) -> None:
+        from uare.asset_origins import COPY_EVIDENCE
+        ui = "assets/ui.bundle"
+        material = next(o for o in shared_objects() if o.class_name == "Material")
+        texture = next(o for o in shared_objects() if o.class_name == "Texture2D")
+        menu = [
+            obj(ui, "UI", 1, "AssetBundle", {"m_Container": [["Assets/Art/Hero.mat", {"asset": ptr(0, 30)}]]}),
+            obj(ui, "UI", 21, "Texture2D", dict(texture.data), "shared/textures/ui/atlas.png"),
+            obj(ui, "UI", 30, "Material", dict(material.data), "shared/materials/ui/HeroMat.json"),
+            obj(ui, "UI", 40, "Shader", {"m_Name": "", "m_ParsedForm": {"m_Name": "Sprites/Default"}}),
+            obj(ui, "UI", 100, "GameObject", {"m_Name": "Menu", "m_IsActive": 1, "m_Layer": 0, "m_TagString": "Untagged",
+                "m_Component": [{"component": ptr(0, 101)}, {"component": ptr(0, 102)}]}),
+            obj(ui, "UI", 101, "Transform", {"m_GameObject": ptr(0, 100), "m_Father": ptr(0, 0), "m_Children": []}),
+            obj(ui, "UI", 102, "SpriteRenderer", {"m_GameObject": ptr(0, 100), "m_Enabled": True,
+                "m_Sprite": ptr(0, 0), "m_Materials": [ptr(0, 30)]}),
+        ]
+        game = resolve((FileRecord(SCENE, "level0", ("archive:/CAB/CAB",)), FileRecord(BUNDLE, "CAB", ()),
+                        FileRecord(ui, "UI", ()), FileRecord("Data/globalgamemanagers", "globalgamemanagers", ())),
+                       tuple(scene_objects() + shared_objects() + menu), ())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets = package(root, game)
+            # The material's texture is compared through its exported file, which both copies must have.
+            for exported in (texture.output, "shared/textures/ui/atlas.png"):
+                (assets / str(exported)).parent.mkdir(parents=True)
+                (assets / str(exported)).write_bytes(b"pixels")
+            (assets / "scenes" / "Menu").mkdir()
+            (assets / "scenes" / "Menu" / "scene.json").write_text(json.dumps({
+                "scope_id": "y-scene", "kind": "scene", "name": "Menu", "source": ui, "serialized_file": "UI", "roots": []}))
+            result = build_specs(assets, root / "specs")
+            specs = {name: {a["path"]: a for a in json.loads((root / "specs" / f"{name}.json").read_text())["assets"]}
+                     for name in ("Main", "Menu")}
+        # The built-in scene uses a pathless copy of the material; the bundle scene uses the recorded one.
+        copy, recorded = specs["Main"]["shared/materials/scenes/HeroMat.json"], specs["Menu"]["shared/materials/ui/HeroMat.json"]
+        self.assertEqual((copy["projectPath"], copy["originalPath"], copy["originEvidence"]),
+                         ("Assets/Art/Hero.mat", "Assets/Art/Hero.mat", COPY_EVIDENCE))
+        self.assertEqual(recorded["projectPath"], "Assets/Art/Hero.mat")
+        self.assertNotIn(recorded["originEvidence"], ("", COPY_EVIDENCE))
+        self.assertEqual((result.placed_at_original, result.derived_originals, result.original_conflicts,
+                          result.ambiguous_copies), (2, 1, 0, 0))
 
     def test_player_level_takes_its_build_settings_path(self) -> None:
         settings = obj("Data/globalgamemanagers", "globalgamemanagers", 60, "BuildSettings",
@@ -289,6 +330,15 @@ class SceneSpecTests(unittest.TestCase):
             spec = json.loads((root / "specs" / "Main.json").read_text(encoding="utf-8"))
         self.assertEqual((spec["originalPath"], spec["scenePath"]),
                          ("Assets/Scene/GameLauncher.unity", "Assets/Scene/GameLauncher.unity"))
+
+    def test_built_in_materials_are_referenced_not_copied(self) -> None:
+        objects = [replace(o, name="Sprites-Default", data={**o.data, "m_Name": "Sprites-Default"}) if o.path_id == 30 else o
+                   for o in scene_objects() + shared_objects()]
+        spec, _ = self.build(objects)
+        renderer = next(c for g in spec["gameObjects"] for c in g["components"] if c["className"] == "SpriteRenderer")
+        row = props(renderer)["m_Materials.Array.data[0]"]
+        self.assertEqual((row["refKind"], row["refTarget"], row["refClass"]), ("builtin", "Sprites-Default", "Material"))
+        self.assertFalse(any(a["className"] == "Material" for a in spec["assets"]))
 
     def test_package_without_tag_manager_is_rejected(self) -> None:
         objects = [o for o in scene_objects() + shared_objects() if o.class_name != "TagManager"]

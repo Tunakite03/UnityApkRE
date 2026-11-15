@@ -513,7 +513,20 @@ namespace Uare.SceneBuilder.Editor
                     continue;
                 }
 
-                if (!string.IsNullOrEmpty(texture.missing))
+                if (!string.IsNullOrEmpty(texture.builtin))
+                {
+                    var resource = BuiltinResources.Find("Texture2D", texture.builtin) as Texture;
+                    if (resource != null)
+                    {
+                        material.SetTexture(texture.name, resource);
+                        report.builtinReferences++;
+                    }
+                    else
+                    {
+                        report.materialPropertiesDropped.Add($"{spec.importPath}: texture {texture.name} is the built-in '{texture.builtin}', not found in this Editor");
+                    }
+                }
+                else if (!string.IsNullOrEmpty(texture.missing))
                 {
                     report.materialPropertiesDropped.Add($"{spec.importPath}: texture {texture.name} is a {texture.missing} that was not exported");
                 }

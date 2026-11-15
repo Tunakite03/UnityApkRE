@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace Uare.SceneBuilder.Editor
 {
-    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 4).
+    // Field names match the JSON written by `uare scene-spec` (schema uare.scene-spec, version 5).
     [Serializable]
     internal sealed class SceneSpec
     {
@@ -154,6 +154,8 @@ namespace Uare.SceneBuilder.Editor
         public string name;
         public string path;
         public string missing;
+        // Name of a Unity built-in texture (unity default resources / unity_builtin_extra) used instead of a copy.
+        public string builtin;
         public float scaleX;
         public float scaleY;
         public float offsetX;
@@ -180,10 +182,10 @@ namespace Uare.SceneBuilder.Editor
     internal static class SceneSpecReader
     {
         private const string Schema = "uare.scene-spec";
-        private const int Version = 4;
+        private const int Version = 5;
 
         private static readonly HashSet<string> RowKinds = new HashSet<string> { "number", "string", "arraySize", "ref" };
-        private static readonly HashSet<string> ReferenceKinds = new HashSet<string> { "object", "asset", "null", "missing", "unresolved" };
+        private static readonly HashSet<string> ReferenceKinds = new HashSet<string> { "object", "asset", "builtin", "null", "missing", "unresolved" };
         private static readonly HashSet<string> AssetKinds = new HashSet<string>
         {
             SceneAssetImporter.FileKind, SceneAssetImporter.MaterialKind, SceneAssetImporter.ScriptableKind, SceneAssetImporter.SpriteKind,

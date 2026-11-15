@@ -170,6 +170,16 @@ namespace Uare.SceneBuilder.Editor
                 case "missing":
                     SceneBuildReport.Increment(report.referencesMissing, row.refClass);
                     return WriteOutcome.NotWritten;
+                case "builtin":
+                    value = BuiltinResources.Find(row.refClass, row.refTarget);
+                    if (value == null)
+                    {
+                        SceneBuildReport.Increment(report.referencesMissing, row.refClass + " (built-in not in this Editor)");
+                        return WriteOutcome.NotWritten;
+                    }
+
+                    report.builtinReferences++;
+                    break;
                 case "unresolved":
                     report.referencesUnresolved++;
                     return WriteOutcome.NotWritten;

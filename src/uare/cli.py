@@ -403,7 +403,8 @@ def cmd_assetripper(args: argparse.Namespace) -> int:
 def cmd_assetripper_remap(args: argparse.Namespace) -> int:
     from uare.assetripper_remap import remap
     from uare.assetripper_remap import summarize as summarize_remap
-    result = remap(Path(args.export), Path(args.assets), Path(args.out))
+    catalog = Path(args.addressables_catalog) if args.addressables_catalog else None
+    result = remap(Path(args.export), Path(args.assets), Path(args.out), catalog, args.split_atlases)
     print("\n".join(summarize_remap(result)))
     return 0
 
@@ -444,6 +445,14 @@ def cmd_scene_spec(args: argparse.Namespace) -> int:
     catalog = Path(args.addressables_catalog) if args.addressables_catalog else None
     result = build_specs(Path(args.workdir) / args.assets, Path(args.out), catalog)
     print("\n".join(summarize_specs(result)))
+    return 0
+
+
+def cmd_unity_import(args: argparse.Namespace) -> int:
+    from uare.unity_import import summarize as summarize_import
+    from uare.unity_import import unity_import
+    result = unity_import(Path(args.project), Path(args.unity_project), [Path(p) for p in args.package_dir])
+    print("\n".join(summarize_import(result)))
     return 0
 
 
@@ -689,6 +698,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("export", help="output directory of `uare assetripper`")
     p.add_argument("--assets", required=True, help="package output folder (game_model.json and exported media)")
     p.add_argument("--out", required=True, help="empty directory for project/, mapping.json and report.json")
+    p.add_argument("--addressables-catalog", help="Addressables catalog_*.json: matched assets take their original "
+                   "GUID and project path from it")
+    p.add_argument("--split-atlases", action="store_true", help="cut SpriteAtlas pages (sactx-*) into one PNG per "
+                   "sprite and point references at them, so atlases can be rebuilt")
     p.set_defaults(func=cmd_assetripper_remap)
 
     p = sub.add_parser("package", help="capture scoped game model and export media, hierarchy and raw catalog (needs UnityPy)")
@@ -735,6 +748,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assets", default="extracted-assets", help="package output folder inside workdir (default: extracted-assets)")
     p.add_argument("--out", required=True, help="empty directory for the Unity project")
     p.set_defaults(func=cmd_rebuild)
+
+    p = sub.add_parser("unity-import", help="copy a remapped AssetRipper project into a Unity project, binding "
+                                         "package scripts instead of stub assemblies")
+    p.add_argument("project", help="project/ folder written by `uare assetripper-remap`")
+    p.add_argument("--unity-project", required=True, help="target Unity project (close the Editor first)")
+    p.add_argument("--package-dir", action="append", default=[], help="package folder whose assembly definitions "
+                   "replace same-named stub DLLs (repeatable), e.g. the project's Library/PackageCache/<package>")
+    p.set_defaults(func=cmd_unity_import)
 
     p = sub.add_parser("scene-spec", help="write one build spec per scene for the Unity scene builder package")
     p.add_argument("workdir", help="directory from a prior `uare run` (with extracted-assets/, ...)")

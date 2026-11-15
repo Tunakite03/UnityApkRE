@@ -74,6 +74,11 @@ def _bundle_assets(model: GameModel, edges: dict[str, tuple[Reference, ...]]) ->
     return dict(aliases)
 
 
+def container_keys(model: GameModel, edges: dict[str, tuple[Reference, ...]]) -> dict[str, list[str]]:
+    """Object id -> every AssetBundle container key that names it (paths, or asset GUIDs in GUID-named builds)."""
+    return _bundle_assets(model, edges)
+
+
 def _hierarchy(ids: set[str], by_id: dict[str, ObjectRecord],
                edges: dict[str, tuple[Reference, ...]]) -> tuple[list[Json], list[str]]:
     transforms = {oid for oid in ids if by_id[oid].class_name in {"Transform", "RectTransform"}}

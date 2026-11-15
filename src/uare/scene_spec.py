@@ -19,9 +19,11 @@ The asset table has four kinds of entries, each with the path it gets inside the
 
 Placement: every entry carries ``projectPath``, the original project path when the build records one (an
 AssetBundle container key that is an ``Assets/`` path, or an asset GUID named by an Addressables catalog), with
-the exported file's extension; ``originalPath`` keeps the recorded path itself. An empty ``projectPath`` means no
-original path is known and the builder places the asset under its own folder. A scene carries ``scenePath`` the
-same way (an Addressables scene path, or the BuildSettings path of ``levelN``).
+the exported file's extension; ``originalPath`` keeps the recorded path itself. An asset stored without a path
+(a dependency in player data or in a bundle) takes the path ``uare.asset_origins`` derives for it: its sprite
+source GUID, or an identical copy whose path is recorded. ``originEvidence`` says which of these it was. An empty
+``projectPath`` means no original path is known and the builder places the asset under its own folder. A scene
+carries ``scenePath`` the same way (an Addressables scene path, or the BuildSettings path of ``levelN``).
 
 The Unity-side builder (``unity/com.uare.scenebuilder``) reads a spec inside the Editor and builds the
 scene with Unity's own API, so importers, materials and serialization belong to Unity, not to this module.
@@ -37,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from uare.addressables import asset_paths as catalog_asset_paths
+from uare.asset_origins import derive_origins
 from uare.blueprint import build_scene_paths, original_asset_paths
 from uare.errors import UareError
 from uare.game_model import GameModel, Json, ObjectRecord, Reference, load_model, non_finite, outgoing
@@ -46,7 +49,7 @@ from uare.outdir import staged_output
 LOG = logging.getLogger("uare.scene_spec")
 
 SCHEMA = "uare.scene-spec"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Set structurally by the builder (hierarchy, ownership, script binding) or managed by Unity itself.
 _STRUCTURAL = frozenset({
@@ -70,6 +73,18 @@ _ALPHA8 = 1  # TextureFormat.Alpha8
 
 
 _LEVEL = re.compile(r"level(\d+)")
+# Serialized files that hold Unity's own resources, and the built-in extra assets a build (or an Addressables bundle)
+# copies by name into its own files. A reference to them is written as `builtin`: the builder points it at the
+# Editor's resource of the same class and name instead of importing a copy.
+_BUILTIN_FILES = frozenset({"unity default resources", "unity_builtin_extra"})
+_BUILTIN_EXTRA_MATERIALS = frozenset({"Default-Skybox", "Default-Material", "Sprites-Default", "Default-Line",
+                                      "Default-Particle", "Default-Diffuse", "Default-ParticleSystem", "Sprites-Mask"})
+
+
+def is_builtin(target: ObjectRecord) -> bool:
+    return target.serialized_file in _BUILTIN_FILES or (
+        target.class_name == "Material" and target.name in _BUILTIN_EXTRA_MATERIALS)
+_RECORDED_EVIDENCE = "AssetBundle.m_Container key (a project path, or an asset GUID the Addressables catalog names)"
 
 
 def _is_scene_path(path: str) -> bool:
@@ -93,6 +108,10 @@ class SceneSpecResult:
     placed_at_original: int = 0
     without_original: int = 0
     original_conflicts: int = 0
+    # Of the placed assets, those whose path is derived (sprite source GUID or identical copy), and objects left
+    # without a path because their identical copies record several.
+    derived_originals: int = 0
+    ambiguous_copies: int = 0
 
 
 def _row(path: str, kind: str, number: float = 0.0, text: str = "", ref_kind: str = "",
@@ -130,7 +149,7 @@ def _asset_entry(path: str, import_path: str, kind: str, target: ObjectRecord) -
         "shaderName": "", "renderQueue": -1, "keywords": [], "textures": [], "floats": [], "ints": [], "colors": [],
         "scriptClass": "", "scriptNamespace": "", "scriptAssembly": "", "props": [], "droppedProperties": [],
         "spriteMode": "none", "sprites": [], "spriteName": "", "imagePath": "",
-        "projectPath": "", "originalPath": "",
+        "projectPath": "", "originalPath": "", "originEvidence": "",
     }
 
 
@@ -142,9 +161,14 @@ class _SpecBuilder:
         self._edges = outgoing(model)
         self._source_root = source_root
         self._original = original_asset_paths(model, self._edges, asset_paths)
+        derived = derive_origins(model, self._by_id, self._edges, self._original, asset_paths or {}, source_root)
+        self._derived = derived.origins
+        self.ambiguous_copies = derived.ambiguous
         self._build_scenes = build_scene_paths(model)
         # Project path (case-folded, as the file system compares them) -> the object placed there, across scenes.
         self._placed: dict[str, str] = {}
+        # Project paths taken in the scene being written; a spec names each path once.
+        self._scene_paths: set[str] = set()
         self.placed_at_original: set[str] = set()
         self.without_original: set[str] = set()
         self.original_conflicts: set[str] = set()
@@ -190,6 +214,8 @@ class _SpecBuilder:
         target = self._by_id[ref.target_id]
         if ref.target_id in self._linkable:
             return _row(path, "ref", ref_kind="object", ref_target=ref.target_id, ref_class=target.class_name)
+        if is_builtin(target):
+            return _row(path, "ref", ref_kind="builtin", ref_target=target.name, ref_class=target.class_name)
         asset = self._asset(target)
         if asset is None:
             return _row(path, "ref", ref_kind="missing", ref_target=target.name, ref_class=target.class_name)
@@ -232,6 +258,10 @@ class _SpecBuilder:
         self._place(target, self._assets[output])
         return output
 
+    def derived_originals(self) -> int:
+        """Placed assets whose path is derived, not recorded for the object itself."""
+        return sum(oid in self._derived for oid in self.placed_at_original)
+
     def _scene_original(self, recorded: str, serialized_file: str) -> str:
         """The scene's original path: the recorded scope name, or the BuildSettings entry of a `levelN` file."""
         if _is_scene_path(recorded):
@@ -241,20 +271,31 @@ class _SpecBuilder:
             return self._build_scenes[int(match[1])]
         return recorded
 
+    def _source_asset(self, oid: str) -> str:
+        """The object standing for `oid`'s source asset: the recorded object an identical copy was matched to."""
+        derived = self._derived.get(oid)
+        return derived.copy_of if derived is not None and derived.copy_of is not None else oid
+
     def _place(self, target: ObjectRecord, entry: dict[str, Json]) -> None:
-        """Set `projectPath`: the original path with the import file's extension, unless none is recorded or another
-        object already holds that path (the builder then uses its own folder; both cases are counted)."""
-        original = self._original.get(target.id, "")
+        """Set `projectPath`: the original path with the import file's extension, unless none is known or another
+        asset already holds that path (the builder then uses its own folder; both cases are counted). Identical
+        copies of one asset share its path across scenes: their exported files have the same bytes."""
+        derived = self._derived.get(target.id)
+        original = derived.path if derived is not None else self._original.get(target.id, "")
         entry["originalPath"] = original
         if not original:
             self.without_original.add(target.id)
             return
+        entry["originEvidence"] = derived.evidence if derived is not None else _RECORDED_EVIDENCE
         suffix = PurePosixPath(str(entry["importPath"])).suffix
         candidate = str(PurePosixPath(original).with_suffix(suffix))
-        holder = self._placed.setdefault(candidate.casefold(), target.id)
-        if holder != target.id:
+        folded = candidate.casefold()
+        holder = self._placed.setdefault(folded, target.id)
+        if holder != target.id and (folded in self._scene_paths or
+                                    self._source_asset(holder) != self._source_asset(target.id)):
             self.original_conflicts.add(target.id)
             return
+        self._scene_paths.add(folded)
         entry["projectPath"] = candidate
         self.placed_at_original.add(target.id)
 
@@ -274,6 +315,7 @@ class _SpecBuilder:
             entry["imagePath"] = image
             entry["projectPath"] = self._assets[image]["projectPath"]
             entry["originalPath"] = self._assets[image]["originalPath"]
+            entry["originEvidence"] = self._assets[image]["originEvidence"]
             self._assets[key] = entry
         return key
 
@@ -379,11 +421,13 @@ class _SpecBuilder:
                 continue
             texture_id = self._target(material.id, f"m_SavedProperties.m_TexEnvs[{index}][1].m_Texture")
             texture = self._by_id.get(texture_id) if texture_id else None
-            path = self._asset(texture) if texture is not None else None
+            builtin = texture.name if texture is not None and is_builtin(texture) else ""
+            path = self._asset(texture) if texture is not None and not builtin else None
             scale = pair[1].get("m_Scale") if isinstance(pair[1].get("m_Scale"), dict) else {}
             offset = pair[1].get("m_Offset") if isinstance(pair[1].get("m_Offset"), dict) else {}
             textures.append({"name": str(pair[0]), "path": path or "",
-                             "missing": texture.class_name if texture is not None and path is None else "",
+                             "missing": texture.class_name if texture is not None and path is None and not builtin else "",
+                             "builtin": builtin,
                              "scaleX": _number(scale.get("x"), 1.0), "scaleY": _number(scale.get("y"), 1.0),
                              "offsetX": _number(offset.get("x"), 0.0), "offsetY": _number(offset.get("y"), 0.0)})
         entry["textures"] = textures
@@ -456,6 +500,7 @@ class _SpecBuilder:
     def scene(self, name: str, header: dict[str, Json], objects: list[ObjectRecord],
               project: dict[str, Json]) -> dict[str, Json]:
         self._assets = {}
+        self._scene_paths = set()
         scene_ids = {o.id for o in objects}
         gameobjects = {o.id: o for o in objects if o.class_name == "GameObject"}
         components: dict[str, list[str]] = {}
@@ -573,11 +618,12 @@ def build_specs(assets_dir: Path, out_dir: Path, addressables_catalog: Path | No
             assets += len(spec["assets"])
     result = SceneSpecResult(tuple(names), game_objects, components, assets, builder.unresolved, str(out_dir),
                              len(builder.placed_at_original), len(builder.without_original),
-                             len(builder.original_conflicts))
+                             len(builder.original_conflicts), builder.derived_originals(), builder.ambiguous_copies)
     event(LOG, logging.INFO, "scene_specs_written", scenes=len(names), game_objects=game_objects,
           components=components, assets=assets, unresolved=builder.unresolved,
           placed_at_original=result.placed_at_original, without_original=result.without_original,
-          original_conflicts=result.original_conflicts)
+          original_conflicts=result.original_conflicts, derived_originals=result.derived_originals,
+          ambiguous_copies=result.ambiguous_copies)
     return result
 
 
@@ -590,4 +636,6 @@ def summarize(result: SceneSpecResult) -> list[str]:
         f"unresolved refs   : {result.unresolved_references}",
         f"original paths    : {result.placed_at_original} assets placed, {result.without_original} without a "
         f"recorded path, {result.original_conflicts} path conflicts",
+        f"derived paths     : {result.derived_originals} of the placed assets (sprite source GUID or identical "
+        f"copy of a recorded asset), {result.ambiguous_copies} left out as ambiguous copies",
     ]

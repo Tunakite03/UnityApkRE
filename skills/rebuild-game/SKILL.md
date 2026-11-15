@@ -59,14 +59,29 @@ packages, a missing Unity project for step 9a).
 4. **Native Unity assets (when AssetRipper is installed in `vendor/assetripper`).**
    Needed for prefabs, AnimationClips, AnimatorControllers and sprite sheets
    (Single/Multiple, borders, PPU) in a Unity project:
-   - `uare assetripper <extracted> --out <new-dir>`. Read its `report.json`: when
-     `script_fields_exported` is false, script fields come only from `package`.
-     AssetRipper GUIDs and file IDs are not original identities; never cite them.
-   - `uare assetripper-remap <export> --assets <package-dir> --out <new-dir>`
-     matches exported assets to source objects by content and writes `project/`
-     with original GUIDs restored where the source file is named by its asset GUID.
-     Use only `matched` rows of `mapping.json`; report ambiguous, unmatched and
-     conflicting assets, which keep AssetRipper GUIDs.
+   - `uare assetripper <extracted> --out <new-dir>`. Give it the same content as
+     `package` (APK plus newer remote bundles cached on the device), with the
+     recovered `global-metadata.dat` in `Data/Managed/Metadata` and `lib/<abi>`, so
+     IL2CPP initialises. Read its `report.json`: when `script_fields_exported` is
+     false, script fields come only from `package`. AssetRipper GUIDs and file IDs
+     are not original identities; never cite them.
+   - `uare assetripper-remap <export> --assets <package-dir> --out <new-dir>
+     [--addressables-catalog <catalog_*.json>] --split-atlases` matches exported
+     assets to source objects by content and writes `project/` with original GUIDs
+     restored where the source file is named by its asset GUID. With the catalog,
+     matched assets and GUID-named files (scenes, shaders) also take their original GUID and project
+     path (exported extension kept). `--split-atlases` cuts SpriteAtlas pages
+     (`sactx-*`) into one PNG per sprite at its rect, rewrites references to them,
+     and drops pages nothing references; atlases are rebuilt later from the sprites.
+     Identical-content copies of one catalog asset (for example a player scene's
+     `sharedassets` copy and the bundle copy) are merged into the catalog path
+     and GUID. Use only `matched` and `duplicate` rows of `mapping.json`; report
+     ambiguous, unmatched and conflicting assets, which keep AssetRipper GUIDs and
+     folders.
+   - Before placing or moving any asset by hand, follow
+     [original asset paths](references/original-asset-paths.md): which build data
+     records a path, where player-data assets come from, `Resources` and built-in
+     checks, and why a name match or a plausible folder is not evidence.
    Without AssetRipper, record the gap and continue.
 5. **Read the blueprint.** Read `blueprint/overview.md` and `report.json`, then the
    relevant `scopes/<id>.js` one at a time. Do not read `index.html` or `game_model.json` whole. These are the main results;
@@ -94,7 +109,24 @@ packages, a missing Unity project for step 9a).
    | The user has a Unity project open and Unity MCP tools respond | 9a, scene by scene (preferred) |
    | Otherwise, or the user asked for a standalone project | 9b, structural draft |
 
-   **9a. Scene by scene into the user's project.**
+   **9a. Into the user's project.**
+   - **Asset import uses AssetRipper.** With the Editor closed, run `uare
+     unity-import <remap>/project --unity-project <project> --package-dir
+     <project>/Library/PackageCache/<package>` (repeat for ugui, textmeshpro,
+     timeline, nuget.newtonsoft-json and any other installed package). It refuses
+     differing existing files, replaces stub DLLs that duplicate a package
+     (assembly definition or precompiled DLL) and rebinds their references,
+     disables Auto Reference on the remaining stubs (Editor platform on) and the
+     generated `UnitySourceGeneratedAssemblyMonoScriptTypes_v1` type that crashes
+     the Editor, and gives recovered `Scripts/Assembly-CSharp` an assembly
+     definition referencing the stubs. With the catalog, remap leaves exports that
+     no evidence places under `Assets/_Unmapped/AssetRipper/<type>/`, so the
+     project root shows only original folders.
+     Then open the project and check the console. This is the asset import path whenever AssetRipper ran: its scenes
+     already reference these assets by GUID.
+   - Scene builder (below) is the fallback when AssetRipper is unavailable, and a
+     check of individual scenes against their specs. It refuses a scene path that
+     already exists, so do not build scenes AssetRipper already provided.
    - `uare scene-spec <workdir> --assets <package-dir> --out <new-dir>` writes one
      spec per scene (hierarchy, flattened serialized fields, resolved references,
      the scene's assets with sprite and material settings, tags and sorting layers).
